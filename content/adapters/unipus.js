@@ -1867,37 +1867,75 @@ function isElementVisible(element) {
   }
 }
 
+function getElementPseudoText(element) {
+  try {
+    const ownerDoc = element.ownerDocument;
+    const view = ownerDoc && ownerDoc.defaultView;
+    if (!view || typeof view.getComputedStyle !== "function") return "";
+    const before = view.getComputedStyle(element, "::before");
+    const after = view.getComputedStyle(element, "::after");
+    const beforeText = before && typeof before.content === "string" ? before.content : "";
+    const afterText = after && typeof after.content === "string" ? after.content : "";
+    // CSS content 值自带引号（如 "提交"），去掉首尾引号。
+    return (beforeText + afterText).replace(/^["']+|["']+$/g, "").trim();
+  } catch (_error) {
+    return "";
+  }
+}
+
 function findSubmitButton(doc) {
   if (!doc || typeof doc.querySelectorAll !== "function") return { element: null, stats: null };
-  const candidates = [];
-  const stats = { total: 0, withText: 0, visible: 0, enabled: 0, texts: [] };
+  const stats = { total: 0, foot: 0, footVisible: 0, withText: 0, texts: [], pseudo: [] };
+  let footFallback = null; // 页脚最后一个可见未禁用的链接（提交按钮兜底，通常在页脚末尾）
+  const consider = (element, isFoot) => {
+    const text = asString(element.textContent).trim();
+    const pseudo = isFoot ? getElementPseudoText(element) : "";
+    if (/提交/.test(text) || /提交/.test(pseudo)) stats.withText += 1;
+    if (stats.texts.length < 5 && /提交/.test(text)) stats.texts.push(text.slice(0, 24));
+    if (stats.pseudo.length < 5 && pseudo) stats.pseudo.push(pseudo.slice(0, 24));
+    if (!isElementVisible(element)) return null;
+    if (isFoot) stats.footVisible += 1;
+    if (element.disabled === true || element.getAttribute("aria-disabled") === "true") return null;
+    // 文本或伪元素文本含"提交"（排除"提交反馈/评论/意见/问题"等干扰词）即命中。
+    if (/提交/.test(text) && !/提交(?:反馈|评论|意见|问题)/.test(text)) return element;
+    if (/提交/.test(pseudo)) return element;
+    if (isFoot) footFallback = element;
+    return null;
+  };
   // 优先平台底部操作栏（用户实测：提交按钮为 #pc-foot > div > a，<a> 标签）；
-  // 其次作答区内按钮；最后全页候选（button / role=button / a / class 含 submit|confirm，
-  // 按文本"提交"过滤）。
+  // 其次作答区内按钮；最后全页候选（button / role=button / a / class 含 submit|confirm）。
+  const footSeen = new Set();
   for (const selector of ["#pc-foot > div > a", "#pc-foot a"]) {
-    for (const link of safeQueryAll(doc, selector)) candidates.push(link);
+    for (const link of safeQueryAll(doc, selector)) {
+      if (footSeen.has(link)) continue;
+      footSeen.add(link);
+      stats.total += 1;
+      stats.foot += 1;
+      const hit = consider(link, true);
+      if (hit) return { element: hit, stats };
+    }
   }
+  const seen = new Set(footSeen);
   for (const container of safeQueryAll(doc, ".layout-reply-container")) {
-    for (const button of safeQueryAll(container, "button")) candidates.push(button);
+    for (const button of safeQueryAll(container, "button")) {
+      if (seen.has(button)) continue;
+      seen.add(button);
+      stats.total += 1;
+      const hit = consider(button, false);
+      if (hit) return { element: hit, stats };
+    }
   }
   for (const selector of ['button', '[role="button"]', 'a', '[class*="submit" i]', '[class*="confirm" i]']) {
-    for (const element of safeQueryAll(doc, selector)) candidates.push(element);
+    for (const element of safeQueryAll(doc, selector)) {
+      if (seen.has(element)) continue;
+      seen.add(element);
+      stats.total += 1;
+      const hit = consider(element, false);
+      if (hit) return { element: hit, stats };
+    }
   }
-  const seen = new Set();
-  for (const element of candidates) {
-    if (seen.has(element)) continue;
-    seen.add(element);
-    stats.total += 1;
-    const text = asString(element.textContent).trim();
-    if (!/提交/.test(text)) continue;
-    stats.withText += 1;
-    if (stats.texts.length < 5) stats.texts.push(text.slice(0, 24));
-    if (!isElementVisible(element)) continue;
-    stats.visible += 1;
-    if (element.disabled === true || element.getAttribute("aria-disabled") === "true") continue;
-    stats.enabled += 1;
-    if (!/提交(?:反馈|评论|意见|问题)/.test(text)) return { element, stats };
-  }
+  // 页脚候选均无"提交"文本（可能为背景图渲染）时，兜底点击最后一个可见未禁用链接。
+  if (footFallback) return { element: footFallback, stats };
   return { element: null, stats };
 }
 
@@ -1907,9 +1945,10 @@ function clickSubmitButton(context) {
   if (!found.element) {
     const stats = found.stats || {};
     unipusWarn(context,
-      `u校园自动提交：未找到提交按钮（候选 ${stats.total || 0} 个 / 文本含"提交" ${stats.withText || 0} 个` +
-      ` / 可见 ${stats.visible || 0} 个 / 未禁用 ${stats.enabled || 0} 个` +
-      (stats.texts && stats.texts.length ? `；含"提交"文本示例：[${stats.texts.join(" | ")}]` : "") +
+      `u校园自动提交：未找到提交按钮（候选 ${stats.total || 0} 个 / 页脚 #pc-foot 候选 ${stats.foot || 0} 个（可见 ${stats.footVisible || 0}）` +
+      ` / 文本或伪元素含"提交" ${stats.withText || 0} 个` +
+      (stats.texts && stats.texts.length ? `；文本示例：[${stats.texts.join(" | ")}]` : "") +
+      (stats.pseudo && stats.pseudo.length ? `；伪元素示例：[${stats.pseudo.join(" | ")}]` : "") +
       "），请提供提交按钮 selector 以便补充查找规则。");
     return false;
   }
