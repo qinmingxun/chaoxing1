@@ -1605,18 +1605,27 @@ export async function runAutoAnswer(ctx) {
 
 // ==== SECTION: unipus-page-fill ====
 // ---- 页面可见填答（主控 2026-10-18 实测需求：答案直接显示在页面输入框）----
-// 题目容器选择器来自真实页面核对（用户提供）：
-//   #main-content ... .layout-reply-container .item（每题一个容器），
-//   填空/简答输入框为容器内 input/textarea（DOM 顺序 = 空位顺序，
-//   span:nth-child(N) > input）。
+// 作答区容器选择器来自真实页面核对（用户提供，两种题型实测）：
+//   填空：  #main-content ... .layout-reply-container .item 内 span > input
+//   简答：  #main-content ... .layout-reply-container .question-inputbox-body 内 textarea
+// 共同祖先 .layout-reply-container 内的文本输入框（input[非 hidden/radio/
+// checkbox/submit/button] 与 textarea）按 DOM 顺序 = 答案队列顺序。
 // 填答用原生 value setter（沿原型链）+ input 事件，平台前端框架可识别；
 // 提交注入仍保留（双保险：页面填答失败不影响提交时改写 payload）。
 const UNIPUS_DOM_ITEM_SELECTOR_CANDIDATES = Object.freeze([
-  "#main-content .layout-reply-container .item",
-  ".layout-reply-container .item",
-  ".reply-container .item",
+  "#main-content .layout-reply-container",
+  ".layout-reply-container",
   ".item",
 ]);
+
+const UNIPUS_DOM_SKIP_INPUT_TYPES = Object.freeze({
+  hidden: true,
+  radio: true,
+  checkbox: true,
+  submit: true,
+  button: true,
+  file: true,
+});
 
 function setUnipusInputValue(element, value) {
   if (!element) return;
@@ -1676,11 +1685,16 @@ function fillAnswersToPage(doc, answers) {
   if (!Array.isArray(answers) || !answers.length) return 0;
   let inputs = [];
   for (const selector of UNIPUS_DOM_ITEM_SELECTOR_CANDIDATES) {
-    const itemNodes = safeQueryAll(doc, selector);
-    if (!itemNodes.length) continue;
+    const containerNodes = safeQueryAll(doc, selector);
+    if (!containerNodes.length) continue;
     const candidateInputs = [];
-    for (const item of itemNodes) {
-      for (const input of safeQueryAll(item, "input, textarea")) candidateInputs.push(input);
+    for (const container of containerNodes) {
+      for (const input of safeQueryAll(container, "input, textarea")) {
+        const tagName = asString(input && input.tagName).toLowerCase();
+        const type = asString(input && input.type).toLowerCase();
+        if (tagName === "input" && UNIPUS_DOM_SKIP_INPUT_TYPES[type]) continue;
+        candidateInputs.push(input);
+      }
     }
     if (!candidateInputs.length) continue;
     // 输入框总数与答案数一致才采用（防止宽泛候选误命中无关输入框）；
