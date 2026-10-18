@@ -1868,14 +1868,18 @@ function isElementVisible(element) {
 }
 
 function findSubmitButton(doc) {
-  if (!doc || typeof doc.querySelectorAll !== "function") return null;
+  if (!doc || typeof doc.querySelectorAll !== "function") return { element: null, stats: null };
   const candidates = [];
-  // 优先作答区内按钮；其次平台底部操作栏（用户实测：提交按钮为 #pc-foot 内的 <a>）；
-  // 最后全页候选（button / role=button / a / class 含 submit|confirm，按文本"提交"过滤）。
+  const stats = { total: 0, withText: 0, visible: 0, enabled: 0, texts: [] };
+  // 优先平台底部操作栏（用户实测：提交按钮为 #pc-foot > div > a，<a> 标签）；
+  // 其次作答区内按钮；最后全页候选（button / role=button / a / class 含 submit|confirm，
+  // 按文本"提交"过滤）。
+  for (const selector of ["#pc-foot > div > a", "#pc-foot a"]) {
+    for (const link of safeQueryAll(doc, selector)) candidates.push(link);
+  }
   for (const container of safeQueryAll(doc, ".layout-reply-container")) {
     for (const button of safeQueryAll(container, "button")) candidates.push(button);
   }
-  for (const link of safeQueryAll(doc, "#pc-foot a")) candidates.push(link);
   for (const selector of ['button', '[role="button"]', 'a', '[class*="submit" i]', '[class*="confirm" i]']) {
     for (const element of safeQueryAll(doc, selector)) candidates.push(element);
   }
@@ -1883,23 +1887,33 @@ function findSubmitButton(doc) {
   for (const element of candidates) {
     if (seen.has(element)) continue;
     seen.add(element);
-    if (!isElementVisible(element)) continue;
-    if (element.disabled === true || element.getAttribute("aria-disabled") === "true") continue;
+    stats.total += 1;
     const text = asString(element.textContent).trim();
-    if (!text) continue;
-    if (/提交/.test(text) && !/提交(?:反馈|评论|意见|问题)/.test(text)) return element;
+    if (!/提交/.test(text)) continue;
+    stats.withText += 1;
+    if (stats.texts.length < 5) stats.texts.push(text.slice(0, 24));
+    if (!isElementVisible(element)) continue;
+    stats.visible += 1;
+    if (element.disabled === true || element.getAttribute("aria-disabled") === "true") continue;
+    stats.enabled += 1;
+    if (!/提交(?:反馈|评论|意见|问题)/.test(text)) return { element, stats };
   }
-  return null;
+  return { element: null, stats };
 }
 
 function clickSubmitButton(context) {
   const doc = getContextDocument(context);
-  const button = findSubmitButton(doc);
-  if (!button) {
+  const found = findSubmitButton(doc);
+  if (!found.element) {
+    const stats = found.stats || {};
     unipusWarn(context,
-      "u校园自动提交：未找到提交按钮（若页面确有提交按钮，请提供其 selector 以便补充查找规则）。");
+      `u校园自动提交：未找到提交按钮（候选 ${stats.total || 0} 个 / 文本含"提交" ${stats.withText || 0} 个` +
+      ` / 可见 ${stats.visible || 0} 个 / 未禁用 ${stats.enabled || 0} 个` +
+      (stats.texts && stats.texts.length ? `；含"提交"文本示例：[${stats.texts.join(" | ")}]` : "") +
+      "），请提供提交按钮 selector 以便补充查找规则。");
     return false;
   }
+  const button = found.element;
   try {
     button.click();
   } catch (_error) {
