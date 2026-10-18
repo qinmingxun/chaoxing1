@@ -1364,12 +1364,132 @@
     removeCommunication();
     disableConfirmOverrides();
     restoreNetworkHooks();
+    restoreFakeAudioStream();
     state.disposed = true;
     state.disposing = false;
     clearMarker();
   }
 
+  // ---- 合成音频流注入（u校园语音题模拟录音）----
+  // 覆写 navigator.mediaDevices.getUserMedia：平台请求音频（录音）时返回
+  // Web Audio 合成的 MediaStream（振荡器音轨经 MediaStreamDestination），
+  // 不经过真实麦克风——无权限弹窗、无环境噪声；视频/屏幕等非音频请求
+  // 原样放行。保留最近 N 个流引用防止垃圾回收，超出时停掉最旧的。
+  var fakeAudioStreams = [];
+  var FAKE_AUDIO_MAX_STREAMS = 5;
+
+  function installFakeAudioStream() {
+    var navigatorObject = null;
+    try {
+      navigatorObject = globalWindow.navigator;
+    } catch (ignoredNavigatorError) {
+      navigatorObject = null;
+    }
+    var mediaDevices = navigatorObject && navigatorObject.mediaDevices;
+    if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') {
+      return;
+    }
+    if (mediaDevices.__courseHelperOriginalGetUserMedia) {
+      return; // 幂等
+    }
+    var original = mediaDevices.getUserMedia;
+    try {
+      Object.defineProperty(mediaDevices, '__courseHelperOriginalGetUserMedia', {
+        configurable: true,
+        value: original
+      });
+    } catch (ignoredDefineError) {
+      // 标记失败不影响覆写。
+    }
+
+    mediaDevices.getUserMedia = function fakeGetUserMedia(constraints) {
+      var wantsAudio = false;
+      try {
+        wantsAudio = !!(constraints && (constraints.audio === true ||
+          (constraints.audio && typeof constraints.audio === 'object')));
+      } catch (ignoredConstraintsError) {
+        wantsAudio = false;
+      }
+      if (!wantsAudio) {
+        return original.apply(navigatorObject, arguments);
+      }
+      try {
+        var AudioContextCtor = globalWindow.AudioContext || globalWindow.webkitAudioContext;
+        if (!AudioContextCtor) {
+          return original.apply(navigatorObject, arguments);
+        }
+        var context = new AudioContextCtor();
+        var destination = context.createMediaStreamDestination();
+        var oscillator = context.createOscillator();
+        var gain = context.createGain();
+        gain.gain.value = 0.06; // 低音量柔和音，避免爆音
+        oscillator.type = 'sine';
+        oscillator.frequency.value = 220;
+        oscillator.connect(gain);
+        gain.connect(destination);
+        oscillator.start();
+        // autoplay 策略可能将 AudioContext 挂起，尝试恢复（失败也不阻塞）。
+        if (typeof context.resume === 'function') {
+          try {
+            context.resume();
+          } catch (ignoredResumeError) {
+            // 挂起状态下流轨可能为静音，但不影响流程推进。
+          }
+        }
+        fakeAudioStreams.push({ context: context, oscillator: oscillator });
+        while (fakeAudioStreams.length > FAKE_AUDIO_MAX_STREAMS) {
+          var old = fakeAudioStreams.shift();
+          try {
+            old.oscillator.stop();
+          } catch (ignoredStopError) {
+            // 已停止的振荡器安全跳过。
+          }
+          try {
+            old.context.close();
+          } catch (ignoredCloseError) {
+            // 已关闭的上下文安全跳过。
+          }
+        }
+        console.log('[course-helper] MAIN bridge：已提供合成音频流（不经过真实麦克风）。');
+        return Promise.resolve(destination.stream);
+      } catch (fakeStreamError) {
+        return original.apply(navigatorObject, arguments);
+      }
+    };
+  }
+
+  function restoreFakeAudioStream() {
+    var navigatorObject = null;
+    try {
+      navigatorObject = globalWindow.navigator;
+    } catch (ignoredNavigatorError) {
+      navigatorObject = null;
+    }
+    var mediaDevices = navigatorObject && navigatorObject.mediaDevices;
+    var original = mediaDevices && mediaDevices.__courseHelperOriginalGetUserMedia;
+    if (mediaDevices && original && typeof mediaDevices.getUserMedia === 'function' &&
+        mediaDevices.getUserMedia.name === 'fakeGetUserMedia') {
+      mediaDevices.getUserMedia = original;
+    }
+    while (fakeAudioStreams.length) {
+      var record = fakeAudioStreams.shift();
+      try {
+        record.oscillator.stop();
+      } catch (ignoredStopError) {
+        // 已停止的振荡器安全跳过。
+      }
+      try {
+        record.context.close();
+      } catch (ignoredCloseError) {
+        // 已关闭的上下文安全跳过。
+      }
+    }
+  }
+
   installCommunication();
   installXhrHook();
   installFetchHook();
+  // 合成音频流注入（u校园语音题）：不经过真实麦克风（无权限弹窗、
+  // 无环境噪声），平台 MediaRecorder 录到程序生成的音频轨。
+  installFakeAudioStream();
 })(typeof window !== 'undefined' ? window : null);

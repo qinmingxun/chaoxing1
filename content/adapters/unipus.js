@@ -2028,10 +2028,9 @@ export async function runAutoAnswer(ctx) {
     return (qtype === 0 || qtype === 1 || qtype === 3) &&
       Boolean(result && result.solved === true);
   });
-  // 语音题：提交前模拟录音（TTS 朗读题目句子 → 麦克风录入），通过前端"已录音"校验；
-  // 首次使用需用户手动授权一次麦克风权限（浏览器权限框无法程序化点击）。
+  // 语音题：提交前模拟录音（合成音频流由 MAIN bridge 注入，不使用真实麦克风）。
   if (hasVoiceQuestions) {
-    await simulateVoiceRecordings(context, questions);
+    await simulateVoiceRecordings(context);
   }
   // 整页只有语音题（无任何可求解题目）时也自动提交：占位空答案翻页。
   const voiceOnlyPage = hasVoiceQuestions && solvableQuestions.length === 0;
@@ -2216,15 +2215,13 @@ function installPageFillObserver(context, answers) {
 // ==== SECTION: unipus-voice ====
 // ---- 语音题模拟录音（主控 2026-10-18 实测：朗读句/对话题，v1 不做真实录音）----
 // 前端校验拦截提交（语音题未录音不发请求）。方案：点击平台的录音按钮开始 →
-// 用浏览器 TTS（speechSynthesis）把题目句子朗读出来（扬声器发声被麦克风录入，
-// 系统音量不可静音）→ 再点同一按钮停止，平台获得含真实朗读人声的录音，
-// 通过"已录音"校验后照常提交翻页。
-// 麦克风权限：首次点击录音时浏览器弹权限框，需用户手动允许一次（之后站点持久）。
+// 等待录制窗口 → 再点停止。录音内容由 MAIN bridge 注入的合成音频流提供
+// （见 main-world-bridge.js 的 installFakeAudioStream：覆写 getUserMedia，
+// 不经过真实麦克风——无权限弹窗、无环境噪声）。
 // 按钮结构（用户实测 selector）：.record-button-group > div:nth-child(2)（麦克风）。
 
-const VOICE_RECORD_DURATION_MS = 2500; // 无朗读文本时（兜底）的录音窗口时长
+const VOICE_RECORD_DURATION_MS = 3000; // 录音窗口时长
 const VOICE_RECORD_GROUP_SELECTOR = ".record-button-group";
-const VOICE_TTS_MAX_MS = 15000; // 单句 TTS 兜底超时（防止 onend 未触发）
 
 function collectRecordButtons(doc) {
   const buttons = [];
@@ -2243,57 +2240,7 @@ function collectRecordButtons(doc) {
   return buttons;
 }
 
-// 语音题朗读文本：题干剔除常见指令前缀（"朗读以下句子：" "Read the sentence aloud" 等），
-// 保留要朗读的句子本体。
-function voiceSpeechTextFor(question) {
-  if (!question) return "";
-  const stem = stripTagsHtml(asString(question.stem)).replace(/\s+/g, " ").trim();
-  const cleaned = stem
-    .replace(/^(请)?(朗读|跟读|读出|大声朗读|诵读)(以下)?(句子|段落|内容|文本|对话)?[:：]\s*/i, "")
-    .replace(/read (the |following |this )?(sentence|passage|text|paragraph|conversation)s? aloud[:.]?\s*/i, "")
-    .trim();
-  return cleaned;
-}
-
-// 浏览器 TTS 朗读：返回是否成功开始朗读（扬声器发声，麦克风录到人声）。
-function speakTextViaTts(text) {
-  return new Promise((resolve) => {
-    const view = getContextWindow(activeContext) || getGlobalRoot();
-    const synthesis = view && view.speechSynthesis;
-    const UtteranceConstructor = (view && view.SpeechSynthesisUtterance) ||
-      (typeof SpeechSynthesisUtterance !== "undefined" ? SpeechSynthesisUtterance : null);
-    if (!synthesis || typeof synthesis.speak !== "function" || !UtteranceConstructor) {
-      resolve(false);
-      return;
-    }
-    let utterance = null;
-    try {
-      utterance = new UtteranceConstructor(text);
-    } catch (_error) {
-      resolve(false);
-      return;
-    }
-    utterance.lang = /[一-鿿]/.test(text) ? "zh-CN" : "en-US";
-    utterance.rate = 0.9;
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      resolve(true);
-    };
-    utterance.onend = finish;
-    utterance.onerror = finish;
-    try {
-      synthesis.speak(utterance);
-    } catch (_error) {
-      finish();
-      return;
-    }
-    setTimeout(finish, VOICE_TTS_MAX_MS);
-  });
-}
-
-async function simulateVoiceRecordings(context, questions) {
+async function simulateVoiceRecordings(context) {
   const doc = getContextDocument(context);
   const buttons = collectRecordButtons(doc);
   if (!buttons.length) {
@@ -2301,27 +2248,14 @@ async function simulateVoiceRecordings(context, questions) {
       "u校园语音题：未找到录音按钮（.record-button-group），无法模拟录音，提交可能被前端校验拦截。");
     return false;
   }
-  // 语音题序列与录音按钮按 DOM 顺序对齐，逐题"开始 → TTS 朗读 → 停止"。
-  const voiceQuestions = (questions || []).filter((question) => question && question.__isVoice === true);
-  const pairCount = Math.min(buttons.length, voiceQuestions.length);
   unipusLog(context,
-    `u校园语音题：模拟录音 ${buttons.length} 处（TTS 朗读题目句子，请保持系统音量非静音）。` +
-    "首次使用如弹出麦克风权限框，请点击\"允许\"（可勾选始终允许）。");
-  for (let index = 0; index < pairCount; index += 1) {
-    clickElementSafely(context, buttons[index]); // 开始录音
-    const speechText = voiceSpeechTextFor(voiceQuestions[index]);
-    const spoke = speechText ? await speakTextViaTts(speechText) : false;
-    if (!spoke) {
-      await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
-    }
-    clickElementSafely(context, buttons[index]); // 停止录音
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    `u校园语音题：模拟录音 ${buttons.length} 处（合成音频流，不使用真实麦克风）。`);
+  for (const button of buttons) {
+    clickElementSafely(context, button); // 开始录音
   }
-  // 无对应题目文本的多余录音按钮：按静默窗口处理。
-  for (let index = pairCount; index < buttons.length; index += 1) {
-    clickElementSafely(context, buttons[index]);
-    await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
-    clickElementSafely(context, buttons[index]);
+  await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
+  for (const button of buttons) {
+    clickElementSafely(context, button); // 停止录音
   }
   await new Promise((resolve) => setTimeout(resolve, 800));
   return true;
