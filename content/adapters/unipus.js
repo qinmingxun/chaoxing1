@@ -1870,11 +1870,13 @@ function isElementVisible(element) {
 function findSubmitButton(doc) {
   if (!doc || typeof doc.querySelectorAll !== "function") return null;
   const candidates = [];
-  // 优先作答区内按钮；其次全页候选（button / role=button / class 含 submit|confirm）。
+  // 优先作答区内按钮；其次平台底部操作栏（用户实测：提交按钮为 #pc-foot 内的 <a>）；
+  // 最后全页候选（button / role=button / a / class 含 submit|confirm，按文本"提交"过滤）。
   for (const container of safeQueryAll(doc, ".layout-reply-container")) {
     for (const button of safeQueryAll(container, "button")) candidates.push(button);
   }
-  for (const selector of ['button', '[role="button"]', '[class*="submit" i]', '[class*="confirm" i]']) {
+  for (const link of safeQueryAll(doc, "#pc-foot a")) candidates.push(link);
+  for (const selector of ['button', '[role="button"]', 'a', '[class*="submit" i]', '[class*="confirm" i]']) {
     for (const element of safeQueryAll(doc, selector)) candidates.push(element);
   }
   const seen = new Set();
