@@ -735,29 +735,83 @@ function choiceContainers(doc) {
   return containers;
 }
 
-function clickUnipusChoiceOption(optionIndex, option) {
+// 按题干文本定位题块（一页多题时避免跨题点错选项）：先找含题干文本的最深元素，
+// 再向上找最近的含 radio/checkbox 的祖先（题块），找不到题块时回退整容器。
+function findStemElement(container, stemText) {
+  if (!container || !stemText) return null;
+  const normalizedStem = stemText.replace(/\s+/g, "");
+  if (!normalizedStem) return null;
+  // 完整题干优先；失败则尝试尾部片段（direction 主题干可能渲染在公共区域，
+  // 题干核心（quesText）在拼接串末尾）。
+  const candidates = [normalizedStem];
+  for (const len of [60, 40, 20]) {
+    if (normalizedStem.length > len) candidates.push(normalizedStem.slice(-len));
+  }
+  for (const candidate of candidates) {
+    const all = safeQueryAll(container, "*");
+    let best = null;
+    let bestLength = Infinity;
+    for (const element of all) {
+      const elementText = asString(element.textContent).replace(/\s+/g, "");
+      if (!elementText || elementText.length >= bestLength) continue;
+      if (elementText.indexOf(candidate) !== -1) {
+        best = element;
+        bestLength = elementText.length;
+      }
+    }
+    if (best) return best;
+  }
+  return null;
+}
+
+function findChoiceBlock(stemElement, container) {
+  let node = stemElement;
+  while (node && node !== container) {
+    const radios = safeQueryAll(node, "input[type=radio], input[type=checkbox]");
+    if (radios.length) return node;
+    try {
+      node = node.parentElement || null;
+    } catch (_error) {
+      node = null;
+    }
+  }
+  return null;
+}
+
+function clickUnipusChoiceOption(question, optionIndex, option) {
   const doc = getContextDocument(activeContext);
   if (!doc) return false;
   const text = choiceOptionText(option);
+  const stemText = question && question.stem ? stripTagsHtml(asString(question.stem)) : "";
   const containers = choiceContainers(doc);
   let radioCount = 0;
   for (const container of containers) {
-    // 策略 1：radio/checkbox 按 DOM 顺序取第 optionIndex 个。
-    const choiceInputs = safeQueryAll(container, "input[type=radio], input[type=checkbox]");
+    // 题块定位：按题干文本找题块（一页多题的场景），失败回退整容器。
+    let choiceBlock = container;
+    const stemElement = stemText ? findStemElement(container, stemText) : null;
+    if (stemElement) {
+      const block = findChoiceBlock(stemElement, container);
+      if (block) choiceBlock = block;
+    }
+    // 策略 1：题块内 radio/checkbox 按 DOM 顺序取第 optionIndex 个。
+    const choiceInputs = safeQueryAll(choiceBlock, "input[type=radio], input[type=checkbox]");
     if (choiceInputs.length) radioCount = choiceInputs.length;
     if (choiceInputs.length > optionIndex) {
       const input = choiceInputs[optionIndex];
-      let label = null;
+      let target = null;
       try {
-        if (typeof input.closest === "function") label = input.closest("label");
+        if (typeof input.closest === "function") {
+          target = input.closest("label");
+          if (!target && input.parentElement) target = input.parentElement;
+        }
       } catch (_error) {
-        label = null;
+        target = null;
       }
-      if (clickElementSafely(activeContext, label || input)) return true;
+      if (clickElementSafely(activeContext, target || input)) return true;
     }
-    // 策略 2：按选项文本匹配最深文本元素。
+    // 策略 2：按选项文本匹配题块内最深文本元素。
     if (text) {
-      const all = safeQueryAll(container, "*");
+      const all = safeQueryAll(choiceBlock, "*");
       let best = null;
       let bestLength = Infinity;
       const normalizedTarget = text.replace(/\s+/g, "");
@@ -786,7 +840,7 @@ function clickUnipusChoiceOption(optionIndex, option) {
   }
   unipusWarn(activeContext,
     `u校园选项点击未命中：optionIndex=${optionIndex}，选项文本="${text}"，` +
-    `作答区 radio/checkbox 共 ${radioCount} 个（选项 DOM 结构需在真实页面核对）。`);
+    `题块内 radio/checkbox 共 ${radioCount} 个（选项 DOM 结构需在真实页面核对）。`);
   return false;
 }
 
@@ -796,7 +850,7 @@ function withChoiceClick(question) {
   const qtype = question.qtype;
   if (qtype !== 0 && qtype !== 1 && qtype !== 3) return question;
   question.clickOption = (optionIndex, option) =>
-    clickUnipusChoiceOption(optionIndex, option);
+    clickUnipusChoiceOption(question, optionIndex, option);
   return question;
 }
 
