@@ -1739,6 +1739,12 @@ function handleSubmitPayload(payload) {
   }
   const usedTimeText = Number.isNaN(usedTime) ? "未知" : `${usedTime} 秒`;
   unipusLog(activeContext, `u校园提交已注入：answerCount=${answerCount}，usedTime=${usedTimeText}`);
+  // 提交观测达成：清除"未观察到提交"的警告计时。
+  submitObserved = true;
+  if (submitObserveTimer) {
+    clearTimeout(submitObserveTimer);
+    submitObserveTimer = null;
+  }
   // 主控接线：本轮提交已消费答案队列。清空拦截缓存并重置自动答题/自动提交状态，
   // SPA 切下一页后新题到达（handleQuestionDataPayload → scheduleAutoAnswerForNewQuestions）
   // 会自动重新求解填答，无需刷新页面。缓存必须在此时清空，否则旧题与新题混排
@@ -2186,6 +2192,18 @@ function installPageFillObserver(context, answers) {
 
 const AUTO_SUBMIT_CLICK_DELAY_MS = 2000; // 填答完成后等 2 秒（框架状态同步）再点击
 const autoSubmitState = { timer: null, fired: false };
+// 提交观测：handleSubmitPayload 置 observed=true；点击提交后 8 秒仍无提交
+// 事件则警告（区分"前端校验拦截"与"提交请求正常注入"）。
+let submitObserved = false;
+let submitObserveTimer = null;
+
+function resetSubmitObservation() {
+  submitObserved = false;
+  if (submitObserveTimer) {
+    clearTimeout(submitObserveTimer);
+    submitObserveTimer = null;
+  }
+}
 
 function resetAutoSubmitState() {
   if (autoSubmitState.timer) {
@@ -2193,6 +2211,7 @@ function resetAutoSubmitState() {
     autoSubmitState.timer = null;
   }
   autoSubmitState.fired = false;
+  resetSubmitObservation();
 }
 
 function scheduleAutoSubmit(context) {
@@ -2327,6 +2346,15 @@ function clickSubmitButton(context) {
   }
   if (clickElementSafely(context, found.element)) {
     unipusLog(context, "u校园自动提交：已点击提交按钮，等待平台提交并切下一页。");
+    // 提交观测：8 秒内未观察到提交请求则警告（前端校验拦截/按钮不可用）。
+    resetSubmitObservation();
+    submitObserveTimer = setTimeout(() => {
+      submitObserveTimer = null;
+      if (!submitObserved) {
+        unipusWarn(context,
+          "u校园自动提交：点击后 8 秒未观察到提交请求（平台前端校验拦截或提交按钮不可用？请检查页面状态与弹窗）。");
+      }
+    }, 8000);
     return true;
   }
   unipusWarn(context, "u校园自动提交：提交按钮点击失败。");

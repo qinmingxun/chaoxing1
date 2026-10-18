@@ -623,6 +623,10 @@
 
       try {
         if (info && info.method === 'POST' && isSubmitUrl(info.url)) {
+          // 观测诊断：提交请求每次记录（改写成功与否），用于定位
+          // "点击提交后无任何反应"的卡住场景（请求未发 vs 改写被拒）。
+          console.log('[course-helper] MAIN bridge：观察到提交请求 ' +
+            (info.url || '').slice(0, 120));
           var rewritten = rewriteSubmitBody(body);
           if (rewritten) {
             nextBody = rewritten.body;
@@ -797,6 +801,9 @@
 
       try {
         if (metadata.method === 'POST' && metadata.hasBody && isSubmitUrl(metadata.url)) {
+          // 观测诊断：提交请求每次记录（改写成功与否）。
+          console.log('[course-helper] MAIN bridge：观察到提交请求 ' +
+            (metadata.url || '').slice(0, 120));
           var rewritten = rewriteSubmitBody(metadata.body);
           if (rewritten) {
             var nextInit = copyFetchInit(init);
