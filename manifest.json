@@ -11,7 +11,8 @@
         "*://localhost/*",
         "*://127.0.0.1/*"
       ],
-      "js": ["lib/typr.js", "content/loader.js"]
+      "js": ["lib/typr.js", "content/loader.js"],
+      "all_frames": true
     },
     {
       "matches": [
@@ -23,7 +24,8 @@
       ],
       "js": ["content/main-world-bridge.js"],
       "world": "MAIN",
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "permissions": ["storage", "scripting"],

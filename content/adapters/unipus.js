@@ -2268,22 +2268,33 @@ function collectRecordButtons(doc) {
 
 async function simulateVoiceRecordings(context) {
   const doc = getContextDocument(context);
-  const buttons = collectRecordButtons(doc);
-  if (!buttons.length) {
+  const initialButtons = collectRecordButtons(doc);
+  if (!initialButtons.length) {
     unipusWarn(context,
       "u校园语音题：未找到录音按钮（.record-button-group），无法模拟录音，提交可能被前端校验拦截。");
     return false;
   }
+  const count = initialButtons.length;
   unipusLog(context,
-    `u校园语音题：模拟录音 ${buttons.length} 处（合成音频流，不使用真实麦克风）。`);
-  for (const button of buttons) {
-    clickElementSafely(context, button); // 开始录音
+    `u校园语音题：模拟录音 ${count} 处（逐题：开始 → ${VOICE_RECORD_DURATION_MS}ms → 停止；` +
+    "每次点击前实时查询按钮，防止 React 重渲染替换节点后旧引用失效）。");
+  // 逐题录音（平台单录模式：同时开始多题会被互相打断）；
+  // 每次点击前实时查询按钮——录音开始后 React 会重渲染按钮（开始↔停止切换），
+  // 旧 DOM 引用点击无效（实测：录了停不下来的原因）。
+  for (let index = 0; index < count; index += 1) {
+    const startButtons = collectRecordButtons(doc);
+    if (index >= startButtons.length) {
+      unipusWarn(context, `u校园语音题：第 ${index + 1} 个录音按钮未找到（可能被重渲染移除），跳过。`);
+      continue;
+    }
+    clickElementSafely(context, startButtons[index]); // 开始录音
+    await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
+    const stopButtons = collectRecordButtons(doc);
+    if (index < stopButtons.length) {
+      clickElementSafely(context, stopButtons[index]); // 停止（同位置按钮已切换为停止态）
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
   }
-  await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
-  for (const button of buttons) {
-    clickElementSafely(context, button); // 停止录音
-  }
-  await new Promise((resolve) => setTimeout(resolve, 800));
   return true;
 }
 
