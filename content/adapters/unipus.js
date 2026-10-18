@@ -701,6 +701,105 @@ async function decryptUnipusHexContent(content, k) {
 // 递归 children 收集叶子题（quesText 非空），题干 = 祖先 direction 文本 + 自身 quesText。
 // 实测形态补充：填空题的题目文本可能在 contents[].text（含 1)____1____ 占位符），
 // 其 children 为无文本空壳（对应填空位），解析时并入 stem、空壳跳过。
+// ---- 选择题页面填答（主控 2026-10-18 实测：quiz-solver 对 qtype 0/1/3 会尝试
+// 页面点击选项，需要题目对象提供 clickOption 回调，否则报
+// "adapter did not provide a clickable target"）----
+// 点击策略（选项 DOM 结构需在真实页面核对，按通用结构实现）：
+//   1. 作答区 .layout-reply-container 内 input[type=radio/checkbox] 按 DOM 顺序与
+//      题目 options 数组顺序一致，取第 optionIndex 个；优先点击其 label（若有），
+//      否则点击 input 本身（click 事件冒泡可达框架监听）。
+//   2. 无 radio/checkbox 时，按选项文本匹配作答区内最深文本元素，点击其自身或
+//      最近可点击祖先（label / role=radio/checkbox / li / a）。
+// 找不到目标返回 false（quiz-solver 记为 click-failed 并跳过该题，提交注入兜底）。
+
+function choiceOptionText(option) {
+  if (typeof option === "string") return option.trim();
+  if (option && typeof option === "object") {
+    return asString(option.text !== undefined ? option.text :
+      (option.optionText !== undefined ? option.optionText :
+        (option.content !== undefined ? option.content :
+          (option.label !== undefined ? option.label : option.value)))).trim();
+  }
+  return "";
+}
+
+function choiceContainers(doc) {
+  const containers = [];
+  for (const selector of ["#main-content .layout-reply-container", ".layout-reply-container"]) {
+    const found = safeQueryAll(doc, selector);
+    if (found.length) {
+      containers.push(...found);
+      break; // 第一个命中的候选作为容器来源
+    }
+  }
+  return containers;
+}
+
+function clickUnipusChoiceOption(optionIndex, option) {
+  const doc = getContextDocument(activeContext);
+  if (!doc) return false;
+  const text = choiceOptionText(option);
+  const containers = choiceContainers(doc);
+  let radioCount = 0;
+  for (const container of containers) {
+    // 策略 1：radio/checkbox 按 DOM 顺序取第 optionIndex 个。
+    const choiceInputs = safeQueryAll(container, "input[type=radio], input[type=checkbox]");
+    if (choiceInputs.length) radioCount = choiceInputs.length;
+    if (choiceInputs.length > optionIndex) {
+      const input = choiceInputs[optionIndex];
+      let label = null;
+      try {
+        if (typeof input.closest === "function") label = input.closest("label");
+      } catch (_error) {
+        label = null;
+      }
+      if (clickElementSafely(activeContext, label || input)) return true;
+    }
+    // 策略 2：按选项文本匹配最深文本元素。
+    if (text) {
+      const all = safeQueryAll(container, "*");
+      let best = null;
+      let bestLength = Infinity;
+      const normalizedTarget = text.replace(/\s+/g, "");
+      for (const element of all) {
+        const elementText = asString(element.textContent).trim();
+        if (!elementText || elementText.length >= bestLength) continue;
+        const normalized = elementText.replace(/\s+/g, "");
+        if (normalized === normalizedTarget || normalized.endsWith(normalizedTarget)) {
+          best = element;
+          bestLength = elementText.length;
+        }
+      }
+      if (best) {
+        let target = best;
+        try {
+          const clickable = typeof best.closest === "function"
+            ? best.closest('label, [role="radio"], [role="checkbox"], li, a')
+            : null;
+          if (clickable) target = clickable;
+        } catch (_error) {
+          target = best;
+        }
+        if (clickElementSafely(activeContext, target)) return true;
+      }
+    }
+  }
+  unipusWarn(activeContext,
+    `u校园选项点击未命中：optionIndex=${optionIndex}，选项文本="${text}"，` +
+    `作答区 radio/checkbox 共 ${radioCount} 个（选项 DOM 结构需在真实页面核对）。`);
+  return false;
+}
+
+// 给选择题题目对象挂 clickOption 回调（quiz-solver 优先调用，见其 callFillChoiceAnswer）。
+function withChoiceClick(question) {
+  if (!question || typeof question !== "object") return question;
+  const qtype = question.qtype;
+  if (qtype !== 0 && qtype !== 1 && qtype !== 3) return question;
+  question.clickOption = (optionIndex, option) =>
+    clickUnipusChoiceOption(optionIndex, option);
+  return question;
+}
+
 function parseUnipusQuestionJson(plainText) {
   const pick = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
   const questions = [];
@@ -755,13 +854,13 @@ function parseUnipusQuestionJson(plainText) {
           return "";
         })
         .filter((option) => option);
-      questions.push({
+      questions.push(withChoiceClick({
         qtype,
         stem,
         options,
         inputs: [],
         isAnswered: () => false,
-      });
+      }));
       return;
     }
     const countBefore = questions.length;
@@ -772,13 +871,13 @@ function parseUnipusQuestionJson(plainText) {
       const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
         ? UNIPUS_QTYPE_BY_REPLY[replyType]
         : 4;
-      questions.push({
+      questions.push(withChoiceClick({
         qtype,
         stem,
         options: [],
         inputs: [],
         isAnswered: () => false,
-      });
+      }));
     }
   };
   for (const entry of entries) {
@@ -868,7 +967,7 @@ function buildPlaintextQuestion(entry) {
       if (text && options.indexOf(text) === -1) options.push(text);
     }
   }
-  return { qtype, stem, options };
+  return withChoiceClick({ qtype, stem, options });
 }
 
 // 题型解析：数字 0–4 直接校验；类型名（中/英文）映射；与 quiz-solver 的 qtype 一致。
@@ -1082,12 +1181,12 @@ function buildDomQuestion(container) {
     if (!options.length) return null;
     // 判断题识别：题干未标【判断】但选项仅两枚"对/错/正确/错误"时映射为 3（需在真实页面核对）
     if (qtype === 0 && isTrueFalseOptionTexts(options)) qtype = 3;
-    return {
+    return withChoiceClick({
       qtype,
       stem: stemHtml,
       options,
       isAnswered: () => domChoiceAnswered(choiceInputs),
-    };
+    });
   }
 
   if (!textInputs.length) return null;
@@ -1668,8 +1767,18 @@ export async function runAutoAnswer(ctx) {
     (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` : "（页面输入框暂未出现，已持续监听待其渲染后填入；提交时仍会注入）"));
   // 自动提交：页面填答成功即调度点击提交按钮（autoSubmit 开关在调度函数内判定）；
   // 输入框延迟渲染的场景由页面填答观察者填答成功后补调度。
+  // 选择题（单选/多选/判断）无文本输入框：quiz-solver 经 clickOption 回调点击选项，
+  // solved===true 即页面已选中，同样调度自动提交。
   // 填答重试等待期间若发生提交（generation 变化），不再调度自动提交。
-  if (pageFilled > 0 && autoAnswerState.generation === generation) scheduleAutoSubmit(context);
+  const choiceSolved = questions.some((question, index) => {
+    const result = index < results.length ? results[index] : null;
+    const qtype = question && question.qtype;
+    return (qtype === 0 || qtype === 1 || qtype === 3) &&
+      Boolean(result && result.solved === true);
+  });
+  if ((pageFilled > 0 || choiceSolved) && autoAnswerState.generation === generation) {
+    scheduleAutoSubmit(context);
+  }
   return { started: true, answerCount: answers.length };
 }
 
