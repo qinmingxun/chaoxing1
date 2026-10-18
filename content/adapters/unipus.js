@@ -767,7 +767,8 @@ function findStemElement(container, stemText) {
 function findChoiceBlock(stemElement, container) {
   let node = stemElement;
   while (node && node !== container) {
-    const radios = safeQueryAll(node, "input[type=radio], input[type=checkbox]");
+    const radios = safeQueryAll(node,
+      "input[type=radio], input[type=checkbox], .option-wrap");
     if (radios.length) return node;
     try {
       node = node.parentElement || null;
@@ -776,6 +777,26 @@ function findChoiceBlock(stemElement, container) {
     }
   }
   return null;
+}
+
+// 收集作答块内 div.option-wrap 的直接子元素作为选项（用户实测结构：
+// .layout-reply-container ... div.option-wrap > div 即选项，可点击 div）。
+function collectOptionItems(block) {
+  const items = [];
+  if (!block) return items;
+  const wraps = safeQueryAll(block, ".option-wrap");
+  for (const wrap of wraps) {
+    let children = [];
+    try {
+      children = Array.from(wrap.children || []);
+    } catch (_error) {
+      children = [];
+    }
+    for (const child of children) {
+      if (child) items.push(child);
+    }
+  }
+  return items;
 }
 
 function clickUnipusChoiceOption(question, optionIndex, option) {
@@ -792,6 +813,11 @@ function clickUnipusChoiceOption(question, optionIndex, option) {
     if (stemElement) {
       const block = findChoiceBlock(stemElement, container);
       if (block) choiceBlock = block;
+    }
+    // 策略 0（用户实测结构）：div.option-wrap 直接子元素按 DOM 顺序 = 选项。
+    const optionItems = collectOptionItems(choiceBlock);
+    if (optionItems.length > optionIndex) {
+      if (clickElementSafely(activeContext, optionItems[optionIndex])) return true;
     }
     // 策略 1：题块内 radio/checkbox 按 DOM 顺序取第 optionIndex 个。
     const choiceInputs = safeQueryAll(choiceBlock, "input[type=radio], input[type=checkbox]");
@@ -1524,6 +1550,10 @@ const autoAnswerState = {
   // 若 generation 已变化，说明本轮题目已提交，旧题答案作废（不得下发队列，
   // 否则旧答案会注入下一页新题造成位置错位）。
   generation: 0,
+  // 上次求解完成时缓存题目数（getQuestions 后快照）：rerunAfterRunning 补跑前
+  // 用它判断求解期间是否真到达了新题，避免 init 探测与防抖调度竞争导致的
+  // 整轮重复求解（多题一页时浪费大量时间）。
+  lastSolvedCacheLength: -1,
 };
 
 // 新题到达调度（handleQuestionDataPayload 调用）：解锁上一轮锁定，防抖 1.5 秒
@@ -1556,12 +1586,15 @@ function triggerAutoAnswerOnce() {
       // runAutoAnswer 内部已防御，此处兜底防未捕获异常。
     } finally {
       autoAnswerState.running = null;
-      // 求解期间又有新题到达（跨页竞态）：解锁并立即补跑一轮。
+      // 求解期间到达的新题才补跑（跨页竞态）：比较缓存长度，避免 init 探测
+      // 与防抖调度竞争时对同一批题重复求解。
       if (autoAnswerState.rerunAfterRunning) {
         autoAnswerState.rerunAfterRunning = false;
-        autoAnswerState.started = false;
-        autoAnswerState.lastAttemptAt = 0;
-        void triggerAutoAnswerOnce();
+        if (interceptedQuestions.length > autoAnswerState.lastSolvedCacheLength) {
+          autoAnswerState.started = false;
+          autoAnswerState.lastAttemptAt = 0;
+          void triggerAutoAnswerOnce();
+        }
       }
     }
   })();
@@ -1573,6 +1606,7 @@ function resetAutoAnswerState() {
   autoAnswerState.running = null;
   autoAnswerState.lastAttemptAt = 0;
   autoAnswerState.rerunAfterRunning = false;
+  autoAnswerState.lastSolvedCacheLength = -1;
   if (autoAnswerState.retryTimer) {
     clearTimeout(autoAnswerState.retryTimer);
     autoAnswerState.retryTimer = null;
@@ -1747,6 +1781,8 @@ export async function runAutoAnswer(ctx) {
     unipusWarn(context, "u校园未获取到任何题目，跳过答案注入接线。");
     return { started: false, reason: "no-questions" };
   }
+  // 求解快照：补跑判定用（见 triggerAutoAnswerOnce 的 finally 分支）。
+  autoAnswerState.lastSolvedCacheLength = interceptedQuestions.length;
 
   const solver = resolveQuizSolver(context);
   if (!solver || typeof solver.solveQuestions !== "function") {
@@ -1754,9 +1790,22 @@ export async function runAutoAnswer(ctx) {
     return { started: false, reason: "solver-unavailable" };
   }
 
+  // 求解间隔：u校园多题一页场景默认 5 秒/题的间隔会拖慢整个流程（8 题约 40 秒），
+  // 未显式配置 answerIntervalMs 时降为 1 秒（显式配置优先）。
+  let solverContext = context;
+  if (context && context.settings) {
+    const configured = context.settings.answerIntervalMs;
+    if (configured === undefined || configured === null) {
+      solverContext = {
+        ...context,
+        settings: { ...context.settings, answerIntervalMs: 1000 },
+      };
+    }
+  }
+
   let summary = null;
   try {
-    summary = await solver.solveQuestions(questions, context, { autoSubmit: false });
+    summary = await solver.solveQuestions(questions, solverContext, { autoSubmit: false });
   } catch (_error) {
     unipusWarn(context, "solveQuestions 调用失败，跳过答案注入接线。");
     return { started: false, reason: "solve-failed" };
@@ -1808,17 +1857,27 @@ export async function runAutoAnswer(ctx) {
   installSubmitInterceptor();
   // 页面可见填答：把答案按顺序写入页面输入框（失败不阻塞，提交注入仍兜底）。
   // 输入框可能在视频播放后才渲染：先立即尝试，未命中则安装观察者持续监听。
+  // 纯选择题（单选/多选/判断）无文本输入框，跳过输入框重试与观察者（省时）。
+  const hasTextQuestions = questions.some((question) => {
+    const qtype = question && question.qtype;
+    return qtype === 2 || qtype === 4;
+  });
   let pageFilled = fillAnswersToPage(getContextDocument(context), answers);
-  for (let retry = 0; retry < 2 && pageFilled === 0; retry += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    pageFilled = fillAnswersToPage(getContextDocument(context), answers);
-  }
-  if (pageFilled === 0) {
-    installPageFillObserver(context, answers);
+  if (hasTextQuestions) {
+    for (let retry = 0; retry < 2 && pageFilled === 0; retry += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      pageFilled = fillAnswersToPage(getContextDocument(context), answers);
+    }
+    if (pageFilled === 0) {
+      installPageFillObserver(context, answers);
+    }
   }
   unipusLog(context,
     `u校园答案注入已就绪：${answers.length} 道题，等待用户提交时自动注入。` +
-    (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` : "（页面输入框暂未出现，已持续监听待其渲染后填入；提交时仍会注入）"));
+    (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` :
+      (hasTextQuestions
+        ? "（页面输入框暂未出现，已持续监听待其渲染后填入；提交时仍会注入）"
+        : "（选择题：选项已点击，提交时仍会注入）")));
   // 自动提交：页面填答成功即调度点击提交按钮（autoSubmit 开关在调度函数内判定）；
   // 输入框延迟渲染的场景由页面填答观察者填答成功后补调度。
   // 选择题（单选/多选/判断）无文本输入框：quiz-solver 经 clickOption 回调点击选项，
