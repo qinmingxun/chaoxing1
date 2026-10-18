@@ -553,6 +553,10 @@ function parseDecryptedQuestionText(plainText) {
 // 题目 JSON：{replyType, contents[媒体], children[子题递归], options, rule,
 //   quesText, direction{pcText,text,mText}}；叶子题 quesText 非空。
 const UNIPUS_HEX_AES_KEY_PREFIX = "1a2b3c4d";
+// 语音题识别（朗读/口语等需录音作答的题型）：v1 不做录音（spec/40 明确），
+// 识别后按"占位跳过"处理——不送 DeepSeek 求解、答案队列占位空字符串、
+// 页面不填答，提交注入时该题值叶子填入空（平台接受则相当于跳过）。
+const UNIPUS_VOICE_REPLY_KEYWORDS = /speak|oral|record|voice|audio|read[-_ ]?aloud|recite|pronounc/i;
 const UNIPUS_QTYPE_BY_REPLY = Object.freeze({
   "single-choice": 0,
   "singlechoice": 0,
@@ -887,6 +891,19 @@ function stripQuestionNumber(text) {
   return asString(text).replace(/^\s*\d+\s*[)）．.、:：]\s*/, "").trim();
 }
 
+// 未知题型诊断：replyType 不在映射表时每条 log 一次（供主控核对真实页面补充
+// 映射，如语音题的 replyType 值）。
+let loggedUnknownReplyTypes = null;
+function logUnknownReplyTypeOnce(replyType) {
+  if (!replyType) return;
+  if (!loggedUnknownReplyTypes) loggedUnknownReplyTypes = Object.create(null);
+  if (loggedUnknownReplyTypes[replyType]) return;
+  loggedUnknownReplyTypes[replyType] = true;
+  unipusConsoleLog(
+    `u校园未知题型：replyType=${replyType}（若为语音/朗读题将按占位跳过处理，映射表可补充）`,
+  );
+}
+
 function parseUnipusQuestionJson(plainText) {
   const pick = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
   const questions = [];
@@ -934,6 +951,10 @@ function parseUnipusQuestionJson(plainText) {
       const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
         ? UNIPUS_QTYPE_BY_REPLY[replyType]
         : 4;
+      const isVoice = UNIPUS_VOICE_REPLY_KEYWORDS.test(replyType);
+      if (!isVoice && UNIPUS_QTYPE_BY_REPLY[replyType] === undefined) {
+        logUnknownReplyTypeOnce(replyType);
+      }
       const options = (Array.isArray(node.options) ? node.options : [])
         .map((option) => {
           if (typeof option === "string") return stripTagsHtml(option);
@@ -951,6 +972,7 @@ function parseUnipusQuestionJson(plainText) {
         options,
         inputs: [],
         isAnswered: () => false,
+        __isVoice: isVoice,
       }));
       return;
     }
@@ -962,12 +984,17 @@ function parseUnipusQuestionJson(plainText) {
       const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
         ? UNIPUS_QTYPE_BY_REPLY[replyType]
         : 4;
+      const isVoice = UNIPUS_VOICE_REPLY_KEYWORDS.test(replyType);
+      if (!isVoice && UNIPUS_QTYPE_BY_REPLY[replyType] === undefined) {
+        logUnknownReplyTypeOnce(replyType);
+      }
       questions.push(withChoiceClick({
         qtype,
         stem,
         options: [],
         inputs: [],
         isAnswered: () => false,
+        __isVoice: isVoice,
       }));
     }
   };
@@ -1814,11 +1841,23 @@ export async function runAutoAnswer(ctx) {
     }
   }
 
+  // 语音题（朗读/口语等需录音的题型，v1 不做录音——spec/40）：不送 DeepSeek
+  // 求解，答案队列占位空字符串（提交注入时该题值叶子填入空，平台接受则相当于
+  // 跳过）；整页只有语音题时仍自动提交翻页。
+  const solvableIndexes = [];
+  const solvableQuestions = [];
+  questions.forEach((question, index) => {
+    if (question && question.__isVoice === true) return;
+    solvableIndexes.push(index);
+    solvableQuestions.push(question);
+  });
+  const hasVoiceQuestions = solvableQuestions.length < questions.length;
+
   let summary = null;
   try {
     // 并发 3 求解（quiz-solver 仅在该选项显式传入时并发，学习通等平台不受影响）：
     // DeepSeek 答案质量与并发无关，只缩短多题一页的墙钟时间。
-    summary = await solver.solveQuestions(questions, solverContext,
+    summary = await solver.solveQuestions(solvableQuestions, solverContext,
       { autoSubmit: false, concurrency: 3 });
   } catch (_error) {
     unipusWarn(context, "solveQuestions 调用失败，跳过答案注入接线。");
@@ -1835,11 +1874,23 @@ export async function runAutoAnswer(ctx) {
   // 答案队列顺序 = 题目顺序（spec/40：位置填充，不需要题号映射）。
   // 队列元素数必须与题目数一致：任何一题缺少答案都会导致后续题目错位，
   // 因此只要有一题未获得答案就不下发队列（bridge 原样放行提交，安全降级）。
+  // 语音题占位空字符串（不计 missing）：提交注入时该题值叶子填入空。
   const results = asObject(summary) && Array.isArray(summary.results) ? summary.results : [];
+  const solvablePositionByIndex = Object.create(null);
+  solvableIndexes.forEach((originalIndex, position) => {
+    solvablePositionByIndex[originalIndex] = position;
+  });
   const answers = [];
   let missing = 0;
   for (let index = 0; index < questions.length; index += 1) {
-    const result = index < results.length ? results[index] : null;
+    const question = questions[index];
+    if (question && question.__isVoice === true) {
+      answers.push(""); // 语音题占位（不求解、不填答、不占 missing）
+      continue;
+    }
+    const solvablePosition = solvablePositionByIndex[index];
+    const result = solvablePosition !== undefined && solvablePosition < results.length
+      ? results[solvablePosition] : null;
     const answer = result && typeof result.answer === "string" ? result.answer.trim() : "";
     if (!answer) {
       missing += 1;
@@ -1875,7 +1926,7 @@ export async function runAutoAnswer(ctx) {
   // 纯选择题（单选/多选/判断）无文本输入框，跳过输入框重试与观察者（省时）。
   const hasTextQuestions = questions.some((question) => {
     const qtype = question && question.qtype;
-    return qtype === 2 || qtype === 4;
+    return (qtype === 2 || qtype === 4) && question.__isVoice !== true;
   });
   let pageFilled = fillAnswersToPage(getContextDocument(context), answers);
   if (hasTextQuestions) {
@@ -1899,12 +1950,17 @@ export async function runAutoAnswer(ctx) {
   // solved===true 即页面已选中，同样调度自动提交。
   // 填答重试等待期间若发生提交（generation 变化），不再调度自动提交。
   const choiceSolved = questions.some((question, index) => {
-    const result = index < results.length ? results[index] : null;
+    const solvablePosition = solvablePositionByIndex[index];
+    const result = solvablePosition !== undefined && solvablePosition < results.length
+      ? results[solvablePosition] : null;
     const qtype = question && question.qtype;
     return (qtype === 0 || qtype === 1 || qtype === 3) &&
       Boolean(result && result.solved === true);
   });
-  if ((pageFilled > 0 || choiceSolved) && autoAnswerState.generation === generation) {
+  // 整页只有语音题（无任何可求解题目）时也自动提交：占位空答案翻页。
+  const voiceOnlyPage = hasVoiceQuestions && solvableQuestions.length === 0;
+  if ((pageFilled > 0 || choiceSolved || voiceOnlyPage) &&
+      autoAnswerState.generation === generation) {
     scheduleAutoSubmit(context);
   }
   return { started: true, answerCount: answers.length };
@@ -2472,6 +2528,7 @@ export function destroy() {
   interceptedQuestions.length = 0;
   interceptedContentSeen = null;
   loggedEncryptedContent = null;
+  loggedUnknownReplyTypes = null;
 
   // 重置自动答题触发状态（下次 init 可重新触发）
   resetAutoAnswerState();
