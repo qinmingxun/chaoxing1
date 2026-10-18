@@ -11,7 +11,19 @@
         "*://localhost/*",
         "*://127.0.0.1/*"
       ],
-      "js": ["content/loader.js"]
+      "js": ["lib/typr.js", "content/loader.js"]
+    },
+    {
+      "matches": [
+        "*://*.chaoxing.com/*",
+        "*://*.zhihuishu.com/*",
+        "*://*.unipus.cn/*",
+        "*://localhost/*",
+        "*://127.0.0.1/*"
+      ],
+      "js": ["content/main-world-bridge.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
     }
   ],
   "permissions": ["storage", "scripting"],

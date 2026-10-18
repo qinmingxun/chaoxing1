@@ -68,7 +68,13 @@ const KEEP_ALIVE_GLOBAL_KEY = "__COURSE_HELPER_KEEP_ALIVE__";
 
 // ---- 加密题目数据标记（spec/40：content 以 "unipus." 开头即加密题目数据）----
 const ENCRYPTED_CONTENT_PREFIX = "unipus.";
-
+// ---- 已破译的题目密文格式（主控 2026-10-18 实测破译）----
+// 平台另有 content 形态 "unipus-content:" + OpenSSL Salted base64（U2FsdGVkX1 前缀）：
+//   密码固定 "unipus"，EVP_BytesToKey（MD5 迭代）派生 32 字节 key + 16 字节 iv，
+//   AES-256-CBC 解密，明文为题目文本（HTML/纯文本混合）。
+//   k 字段为密钥版本日期（如 20261018），不参与加解密。
+const UNIPUS_CONTENT_PREFIX = "unipus-content:";
+const UNIPUS_AES_PASSWORD = "unipus";
 // ---- 降级保活轻量事件名（页面重新可见时派发一次）----
 const DEGRADED_KEEP_ALIVE_WAKE_EVENT = "course-helper:ucampus:keep-alive-wake";
 
@@ -382,6 +388,162 @@ function logEncryptedQuestionOnce(item) {
   );
 }
 
+// ---- 题目密文解密（主控 2026-10-18 实测破译：OpenSSL Salted + AES-256-CBC）----
+// 格式："unipus-content:" + base64(Salted__ + salt8 + ciphertext)。
+// 密码固定 "unipus"；EVP_BytesToKey（MD5 迭代）派生 key(32)/iv(16)；AES-256-CBC。
+// 解密失败返回 null（保留密文日志与降级路径，不伪造结果）。
+
+function resolveUnipusMd5() {
+  if (typeof globalThis !== "undefined" && typeof globalThis.md5 === "function") {
+    return globalThis.md5;
+  }
+  if (typeof require === "function") {
+    for (const spec of ["../../lib/md5.js", "../lib/md5.js"]) {
+      try {
+        const loaded = require(spec);
+        const fn = typeof loaded === "function" ? loaded : loaded && (loaded.md5 || loaded.default);
+        if (typeof fn === "function") return fn;
+      } catch (_error) {
+        // 继续尝试下一个路径。
+      }
+    }
+  }
+  return null;
+}
+
+function decodeUnipusBase64(text) {
+  const clean = asString(text).replace(/[^A-Za-z0-9+/=]/g, "");
+  if (!clean) return null;
+  if (typeof atob === "function") {
+    try {
+      const binary = atob(clean);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    } catch (_error) {
+      // atob 失败走手写回退。
+    }
+  }
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const out = [];
+  let buffer = 0;
+  let bits = 0;
+  for (let i = 0; i < clean.length; i += 1) {
+    const char = clean.charAt(i);
+    if (char === "=") break;
+    const value = chars.indexOf(char);
+    if (value < 0) continue;
+    buffer = (buffer << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((buffer >> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(out);
+}
+
+function bytesToLatin1(bytes) {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 1) text += String.fromCharCode(bytes[i]);
+  return text;
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+// EVP_BytesToKey（OpenSSL 传统派生）：D_i = MD5(D_{i-1} + password + salt)，
+// 按原始字节级计算（lib/md5.js 支持 Uint8Array 输入），拼接直到满足 keyLen+ivLen。
+function evpBytesToKeyUnipus(password, salt, keyLen, ivLen) {
+  const md5 = resolveUnipusMd5();
+  if (!md5) return null;
+  const passwordBytes = new TextEncoder().encode(password);
+  const parts = [];
+  let prevBytes = new Uint8Array(0);
+  let total = 0;
+  while (total < keyLen + ivLen) {
+    const joined = new Uint8Array(prevBytes.length + passwordBytes.length + salt.length);
+    joined.set(prevBytes, 0);
+    joined.set(passwordBytes, prevBytes.length);
+    joined.set(salt, prevBytes.length + passwordBytes.length);
+    const digestHex = md5(joined);
+    if (typeof digestHex !== "string" || !/^[0-9a-f]{32}$/.test(digestHex)) return null;
+    prevBytes = hexToBytes(digestHex);
+    parts.push(prevBytes);
+    total += prevBytes.length;
+  }
+  const full = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    full.set(part, offset);
+    offset += part.length;
+  }
+  return {
+    key: full.subarray(0, keyLen),
+    iv: full.subarray(keyLen, keyLen + ivLen),
+  };
+}
+
+function getSubtleCrypto() {
+  try {
+    const root = typeof globalThis !== "undefined" ? globalThis : null;
+    return root && root.crypto && root.crypto.subtle ? root.crypto.subtle : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function decryptUnipusContent(content) {
+  const text = asString(content);
+  if (text.indexOf(UNIPUS_CONTENT_PREFIX) !== 0) return null;
+  const subtle = getSubtleCrypto();
+  if (!subtle) return null;
+  const raw = decodeUnipusBase64(text.slice(UNIPUS_CONTENT_PREFIX.length));
+  if (!raw || raw.length < 32) return null;
+  // "Salted__" 魔数（8 字节）+ 8 字节盐 + 密文
+  if (raw[0] !== 0x53 || raw[1] !== 0x61 || raw[2] !== 0x6c ||
+      raw[3] !== 0x74 || raw[4] !== 0x65 || raw[5] !== 0x64 ||
+      raw[6] !== 0x5f || raw[7] !== 0x5f) {
+    return null;
+  }
+  const salt = raw.slice(8, 16);
+  const ciphertext = raw.slice(16);
+  const derived = evpBytesToKeyUnipus(UNIPUS_AES_PASSWORD, salt, 32, 16);
+  if (!derived) return null;
+  try {
+    const cryptoKey = await subtle.importKey("raw", derived.key, { name: "AES-CBC" }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-CBC", iv: derived.iv }, cryptoKey, ciphertext);
+    return new TextDecoder().decode(plain);
+  } catch (_error) {
+    return null; // 解密失败保留密文日志与降级路径。
+  }
+}
+
+// 解密后的题目文本解析（各题型形态待真实页面收集；当前已知"看视频填空"形态：
+// Directions... + 视频时间轴控件文本 + "Write down your answer here."）。
+function parseDecryptedQuestionText(plainText) {
+  const clean = asString(plainText).trim();
+  if (!clean) return [];
+  const textOnly = stripTagsHtml(clean).replace(/\s+/g, " ").trim();
+  if (!textOnly) return [];
+  const isFillBlank = /write down your answer here|填写你的答案|请作答|填空/i.test(textOnly);
+  const question = {
+    qtype: isFillBlank ? 2 : 4,
+    stem: clean,
+    options: [],
+    inputs: [],
+    // 拦截数据的题目没有 DOM 元素：由 quiz-solver 只做答案获取（不做 DOM 填答），
+    // 答案经 setAnswerQueue 下发给 MAIN bridge 在提交时注入。
+    isAnswered: () => false,
+  };
+  return [question];
+}
+
 // ---- 明文兜底解析 ----
 // content 为 JSON 字符串（平台响应结构未知，字段别名探测需在真实页面核对）。
 // 一条 content 可能包含多道题；解析失败返回 []（该条跳过）。
@@ -691,12 +853,23 @@ export async function getQuestions() {
   if (interceptedQuestions.length) {
     const questions = [];
     let encryptedSkipped = 0;
+    let decryptedParsed = 0;
     let plainParsed = 0;
     let plainSkipped = 0;
     for (const item of interceptedQuestions) {
-      if (item.content.indexOf(ENCRYPTED_CONTENT_PREFIX) === 0) {
-        // 密文：解密算法缺失（spec/40 降级顺序第 1/2 条），
-        // console.log 密文与密钥供人工分析，不伪造解密结果，该题跳过并计入警告。
+      if (item.content.indexOf(ENCRYPTED_CONTENT_PREFIX) === 0 ||
+          item.content.indexOf(UNIPUS_CONTENT_PREFIX) === 0) {
+        // 密文：先尝试已破译格式（unipus-content: + OpenSSL Salted + AES-256-CBC，
+        // 密码固定 "unipus"）；失败则保留密文日志供人工分析（spec/40 降级顺序）。
+        const decrypted = await decryptUnipusContent(item.content);
+        if (decrypted) {
+          const parsedQuestions = parseDecryptedQuestionText(decrypted);
+          if (parsedQuestions.length) {
+            for (const question of parsedQuestions) questions.push(question);
+            decryptedParsed += 1;
+            continue;
+          }
+        }
         logEncryptedQuestionOnce(item);
         encryptedSkipped += 1;
         continue;
@@ -713,13 +886,13 @@ export async function getQuestions() {
     if (questions.length) {
       if (encryptedSkipped > 0 || plainSkipped > 0) {
         unipusWarn(activeContext,
-          `u校园拦截题目：${encryptedSkipped} 道密文（解密算法待补）与 ${plainSkipped} 条明文解析失败已跳过，返回可解析的 ${questions.length} 道。`);
+          `u校园拦截题目：解密成功 ${decryptedParsed} 道、明文 ${plainParsed} 条，另有 ${encryptedSkipped} 道密文（未破译格式）与 ${plainSkipped} 条明文解析失败已跳过，返回可解析的 ${questions.length} 道。`);
       }
       return questions;
     }
     if (encryptedSkipped > 0) {
       unipusWarn(activeContext,
-        `u校园拦截到 ${encryptedSkipped} 道加密题目但解密算法缺失（参考脚本后半部分丢失），已跳过并降级为 DOM 提取。`);
+        `u校园拦截到 ${encryptedSkipped} 道加密题目但解密失败（未破译格式或资源缺失），已跳过并降级为 DOM 提取。`);
     }
     if (plainSkipped > 0) {
       unipusWarn(activeContext,
@@ -756,13 +929,10 @@ function ensureMainWorldBridge() {
   if (root && root[MAIN_BRIDGE_FLAG]) return true; // 全局标记防重复注入
 
   const chromeApi = typeof chrome !== "undefined" ? chrome : null;
+  // MAIN world 桥接已由 manifest 的 content_scripts（world:"MAIN"）原生注入；
+  // content script 环境中 chrome.scripting 不可用属预期，静默跳过。
   if (!chromeApi || !chromeApi.scripting ||
       typeof chromeApi.scripting.executeScript !== "function") {
-    if (!bridgeInjectWarned) {
-      bridgeInjectWarned = true;
-      unipusWarn(activeContext,
-        "chrome.scripting.executeScript unavailable，跳过 MAIN bridge 注入（loader 可能已注入）。");
-    }
     return false;
   }
 

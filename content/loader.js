@@ -344,9 +344,11 @@
     }
 
     const chromeApi = getChrome();
+    // MAIN world 桥接已由 manifest 的 content_scripts（world:"MAIN",
+    // run_at:"document_start"）原生注入；此处仅作防御性重注入路径。
+    // content script 环境中 chrome.scripting 不可用属预期，静默跳过。
     if (!chromeApi || !chromeApi.scripting ||
         typeof chromeApi.scripting.executeScript !== 'function') {
-      warnOnce('scripting-unavailable', 'chrome.scripting.executeScript unavailable，跳过 MAIN bridge 注入。');
       return false;
     }
 
@@ -416,9 +418,15 @@
       return state;
     }
     if (!route) {
-      warnOnce(`route:${String(pathname || '')}`, '当前 pathname 没有匹配的课程路由，安全跳过。');
-      state.initialized = true;
-      return state;
+      // 学习通按课程路由（knowledge/cards 等）分发；智慧树/u校园没有课程路由
+      // 概念，由各自适配器的 matches/init 自行判断页面，这里给占位路由放行。
+      if (adapterEntry.name === 'chaoxing') {
+        warnOnce(`route:${String(pathname || '')}`, '当前 pathname 没有匹配的课程路由，安全跳过。');
+        state.initialized = true;
+        return state;
+      }
+      route = Object.freeze({ name: 'ADAPTER_DEFAULT', path: String(pathname || ''), test: null });
+      state.route = route;
     }
 
     await loadSharedModules();
