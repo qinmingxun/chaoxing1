@@ -803,6 +803,20 @@ function collectOptionItems(block) {
   return items;
 }
 
+// 元素描述（诊断日志用）：tagName/class/文本摘要。
+function describeElement(element) {
+  if (!element) return "null";
+  const tagName = asString(element.tagName).toLowerCase() || "?";
+  let className = "";
+  try {
+    className = asString(element.className).slice(0, 40);
+  } catch (_error) {
+    className = "";
+  }
+  const text = asString(element.textContent).replace(/\s+/g, " ").trim().slice(0, 30);
+  return `<${tagName} class="${className}" text="${text}">`;
+}
+
 function clickUnipusChoiceOption(question, optionIndex, option) {
   const doc = getContextDocument(activeContext);
   if (!doc) return false;
@@ -821,7 +835,12 @@ function clickUnipusChoiceOption(question, optionIndex, option) {
     // 策略 0（用户实测结构）：div.option-wrap 直接子元素按 DOM 顺序 = 选项。
     const optionItems = collectOptionItems(choiceBlock);
     if (optionItems.length > optionIndex) {
-      if (clickElementSafely(activeContext, optionItems[optionIndex])) return true;
+      const target = optionItems[optionIndex];
+      if (clickElementSafely(activeContext, target)) {
+        unipusLog(activeContext,
+          `u校园选项点击：第 ${optionIndex} 个选项 → ${describeElement(target)}`);
+        return true;
+      }
     }
     // 策略 1：题块内 radio/checkbox 按 DOM 顺序取第 optionIndex 个。
     const choiceInputs = safeQueryAll(choiceBlock, "input[type=radio], input[type=checkbox]");
@@ -837,7 +856,11 @@ function clickUnipusChoiceOption(question, optionIndex, option) {
       } catch (_error) {
         target = null;
       }
-      if (clickElementSafely(activeContext, target || input)) return true;
+      if (clickElementSafely(activeContext, target || input)) {
+        unipusLog(activeContext,
+          `u校园选项点击（radio）：第 ${optionIndex} 个 → ${describeElement(target || input)}`);
+        return true;
+      }
     }
     // 策略 2：按选项文本匹配题块内最深文本元素。
     if (text) {
@@ -864,7 +887,11 @@ function clickUnipusChoiceOption(question, optionIndex, option) {
         } catch (_error) {
           target = best;
         }
-        if (clickElementSafely(activeContext, target)) return true;
+        if (clickElementSafely(activeContext, target)) {
+          unipusLog(activeContext,
+            `u校园选项点击（文本匹配）：第 ${optionIndex} 个选项 → ${describeElement(target)}`);
+          return true;
+        }
       }
     }
   }
