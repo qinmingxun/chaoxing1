@@ -1562,7 +1562,20 @@ export async function runAutoAnswer(ctx) {
       answers.push("");
       continue;
     }
-    answers.push(answer); // 多选答案按 CONTRACTS 规范（连续大写字母）原样入队
+    // 多选答案按 CONTRACTS 规范（连续大写字母）原样入队。
+    // 填空答案按 # 拆分入队：一题多空对应多个 value 叶子，位置填充语义下
+    // 每个空占一个队列位（bridge 注入按先序 shift，与题目顺序兼容）。
+    if (answer.indexOf("#") !== -1) {
+      for (const part of answer.split("#")) {
+        const trimmed = part.trim();
+        if (!trimmed) {
+          missing += 1;
+        }
+        answers.push(trimmed);
+      }
+    } else {
+      answers.push(answer);
+    }
   }
   if (missing > 0) {
     unipusWarn(context,
