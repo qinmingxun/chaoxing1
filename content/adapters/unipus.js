@@ -2028,6 +2028,11 @@ export async function runAutoAnswer(ctx) {
     return (qtype === 0 || qtype === 1 || qtype === 3) &&
       Boolean(result && result.solved === true);
   });
+  // 语音题：提交前模拟录音（点击录音按钮开始 → 停止），通过前端"已录音"校验；
+  // 首次使用需用户手动授权一次麦克风权限（浏览器权限框无法程序化点击）。
+  if (hasVoiceQuestions) {
+    await simulateVoiceRecordings(context);
+  }
   // 整页只有语音题（无任何可求解题目）时也自动提交：占位空答案翻页。
   const voiceOnlyPage = hasVoiceQuestions && solvableQuestions.length === 0;
   if ((pageFilled > 0 || choiceSolved || voiceOnlyPage) &&
@@ -2207,6 +2212,58 @@ function installPageFillObserver(context, answers) {
 }
 
 // ==== END SECTION: unipus-page-fill ====
+
+// ==== SECTION: unipus-voice ====
+// ---- 语音题模拟录音（主控 2026-10-18 实测：朗读句/对话题，v1 不做真实录音）----
+// 前端校验拦截提交（语音题未录音不发请求）。方案：点击平台的录音按钮开始 →
+// 等待录制窗口 → 再点同一按钮停止，让平台获得一段录音（内容为环境音/静音），
+// 通过"已录音"校验后照常提交翻页（评分可能低，但流程不再卡住）。
+// 麦克风权限：首次点击录音时浏览器弹权限框，需用户手动允许一次（之后站点持久）。
+// 按钮结构（用户实测 selector）：.record-button-group > div:nth-child(2)（麦克风）。
+
+const VOICE_RECORD_DURATION_MS = 2500; // 录音窗口时长
+const VOICE_RECORD_GROUP_SELECTOR = ".record-button-group";
+
+function collectRecordButtons(doc) {
+  const buttons = [];
+  if (!doc) return buttons;
+  for (const group of safeQueryAll(doc, VOICE_RECORD_GROUP_SELECTOR)) {
+    let children = [];
+    try {
+      children = Array.from(group.children || []);
+    } catch (_error) {
+      children = [];
+    }
+    // 用户实测：第 2 个子元素是麦克风按钮；回退取第 1 个或组本身。
+    const target = children.length >= 2 ? children[1] : (children[0] || group);
+    if (target) buttons.push(target);
+  }
+  return buttons;
+}
+
+async function simulateVoiceRecordings(context) {
+  const doc = getContextDocument(context);
+  const buttons = collectRecordButtons(doc);
+  if (!buttons.length) {
+    unipusWarn(context,
+      "u校园语音题：未找到录音按钮（.record-button-group），无法模拟录音，提交可能被前端校验拦截。");
+    return false;
+  }
+  unipusLog(context,
+    `u校园语音题：模拟录音 ${buttons.length} 处（点击开始 → ${VOICE_RECORD_DURATION_MS}ms → 停止）。` +
+    "首次使用如弹出麦克风权限框，请点击\"允许\"（可勾选始终允许）。");
+  for (const button of buttons) {
+    clickElementSafely(context, button);
+  }
+  await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
+  for (const button of buttons) {
+    clickElementSafely(context, button);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  return true;
+}
+
+// ==== END SECTION: unipus-voice ====
 
 // ==== SECTION: unipus-auto-submit ====
 // ---- 自动提交（主控 2026-10-18 实测需求：答案填入后自动提交并随平台切下一页）----
