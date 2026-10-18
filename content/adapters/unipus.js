@@ -880,6 +880,13 @@ function withChoiceClick(question) {
   return question;
 }
 
+// 题干/答案文本清洗：剥离题号前缀（"1)" "2、" "3." "1：" 等）。
+// u校园填空题目文本（contents[].text）常以题号开头，若原样传给 DeepSeek，
+// 模型可能把题号一并写进答案；答案返回后同样剥离，防止题号被填入空位。
+function stripQuestionNumber(text) {
+  return asString(text).replace(/^\s*\d+\s*[)）．.、:：]\s*/, "").trim();
+}
+
 function parseUnipusQuestionJson(plainText) {
   const pick = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
   const questions = [];
@@ -893,14 +900,18 @@ function parseUnipusQuestionJson(plainText) {
   const contentsText = (node) => {
     const parts = [];
     for (const item of Array.isArray(node && node.contents) ? node.contents : []) {
-      const text = stripTagsHtml(asString(item && item.text)).replace(/\s+/g, " ").trim();
+      const text = stripQuestionNumber(
+        stripTagsHtml(asString(item && item.text)).replace(/\s+/g, " ").trim(),
+      );
       if (text) parts.push(text);
     }
     return parts.join(" ");
   };
   const collect = (node, ancestorText) => {
     if (!node || typeof node !== "object") return;
-    const ownText = stripTagsHtml(asString(node.quesText)).replace(/\s+/g, " ").trim();
+    const ownText = stripQuestionNumber(
+      stripTagsHtml(asString(node.quesText)).replace(/\s+/g, " ").trim(),
+    );
     const ownContents = contentsText(node);
     let stem = ancestorText;
     // direction 主题干在前，自身 quesText/contents 文本追加在后。
@@ -1790,22 +1801,9 @@ export async function runAutoAnswer(ctx) {
     return { started: false, reason: "solver-unavailable" };
   }
 
-  // 求解间隔：u校园多题一页场景默认 5 秒/题的间隔会拖慢整个流程（8 题约 40 秒），
-  // 未显式配置 answerIntervalMs 时降为 1 秒（显式配置优先）。
-  let solverContext = context;
-  if (context && context.settings) {
-    const configured = context.settings.answerIntervalMs;
-    if (configured === undefined || configured === null) {
-      solverContext = {
-        ...context,
-        settings: { ...context.settings, answerIntervalMs: 1000 },
-      };
-    }
-  }
-
   let summary = null;
   try {
-    summary = await solver.solveQuestions(questions, solverContext, { autoSubmit: false });
+    summary = await solver.solveQuestions(questions, context, { autoSubmit: false });
   } catch (_error) {
     unipusWarn(context, "solveQuestions 调用失败，跳过答案注入接线。");
     return { started: false, reason: "solve-failed" };
@@ -1835,16 +1833,17 @@ export async function runAutoAnswer(ctx) {
     // 多选答案按 CONTRACTS 规范（连续大写字母）原样入队。
     // 填空答案按 # 拆分入队：一题多空对应多个 value 叶子，位置填充语义下
     // 每个空占一个队列位（bridge 注入按先序 shift，与题目顺序兼容）。
+    // 各段剥离题号前缀（模型可能把 "1) xxx # 2) yyy" 的题号写进答案）。
     if (answer.indexOf("#") !== -1) {
       for (const part of answer.split("#")) {
-        const trimmed = part.trim();
+        const trimmed = stripQuestionNumber(part.trim());
         if (!trimmed) {
           missing += 1;
         }
         answers.push(trimmed);
       }
     } else {
-      answers.push(answer);
+      answers.push(stripQuestionNumber(answer));
     }
   }
   if (missing > 0) {
