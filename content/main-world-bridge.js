@@ -1378,7 +1378,16 @@
         }
         console.log('[course-helper] MAIN bridge：MediaRecorder 已构造（平台开始录音，流来源=' + source + '）。');
       }
-      return new OriginalRecorder(stream, options);
+      var recorder = new OriginalRecorder(stream, options);
+      // stop 观测：平台停止录音时调用（每次 log，用于定位"停不下来"）。
+      if (recorder && typeof recorder.stop === 'function') {
+        var originalStop = recorder.stop.bind(recorder);
+        recorder.stop = function probedStop() {
+          console.log('[course-helper] MAIN bridge：MediaRecorder.stop 被调用（平台停止录音）。');
+          return originalStop.apply(this, arguments);
+        };
+      }
+      return recorder;
     }
     MediaRecorderProbe.prototype = OriginalRecorder.prototype;
     MediaRecorderProbe.isTypeSupported = OriginalRecorder.isTypeSupported;

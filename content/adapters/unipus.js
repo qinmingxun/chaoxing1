@@ -2266,6 +2266,33 @@ function collectRecordButtons(doc) {
   return buttons;
 }
 
+// 停止录音多策略：同位置按钮（实时查询）→ 扫描含"停止"文本的可见按钮
+// （部分平台停止按钮出现在弹层/其他位置）。
+async function tryStopRecording(context, index) {
+  const doc = getContextDocument(context);
+  const buttons = collectRecordButtons(doc);
+  if (index < buttons.length) {
+    clickElementSafely(context, buttons[index]);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 900));
+  const stopCandidates = [];
+  for (const selector of ['button', '[role="button"]', 'a', '.ant-btn', '[class*="btn" i]']) {
+    for (const element of safeQueryAll(doc, selector)) {
+      const text = asString(element.textContent).replace(/\s+/g, "").trim();
+      if (!/停止|stop/i.test(text)) continue;
+      if (!isElementVisible(element)) continue;
+      if (element.disabled === true || element.getAttribute("aria-disabled") === "true") continue;
+      stopCandidates.push(element);
+    }
+  }
+  if (stopCandidates.length) {
+    unipusLog(activeContext,
+      `u校园语音题：尝试点击停止按钮（文本扫描命中 ${describeElement(stopCandidates[0])}）。`);
+    clickElementSafely(context, stopCandidates[0]);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+}
+
 async function simulateVoiceRecordings(context) {
   const doc = getContextDocument(context);
   const initialButtons = collectRecordButtons(doc);
@@ -2289,11 +2316,7 @@ async function simulateVoiceRecordings(context) {
     }
     clickElementSafely(context, startButtons[index]); // 开始录音
     await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
-    const stopButtons = collectRecordButtons(doc);
-    if (index < stopButtons.length) {
-      clickElementSafely(context, stopButtons[index]); // 停止（同位置按钮已切换为停止态）
-    }
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await tryStopRecording(context, index); // 停止（多策略）
   }
   return true;
 }
