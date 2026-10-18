@@ -1867,34 +1867,63 @@
       var solveOptions = options && isRecord(options) ? options : {};
       var list = Array.isArray(questions) ? questions :
         (questions && Array.isArray(questions.questions) ? questions.questions : []);
+      // 并发求解：仅当调用方显式传 options.concurrency（正整数）时启用，
+      // 默认 1 = 原有串行行为（各平台适配器未传时不受影响）。
+      var concurrency = Number(solveOptions.concurrency);
+      if (!Number.isFinite(concurrency) || concurrency < 1 ||
+          Math.floor(concurrency) !== concurrency) {
+        concurrency = 1;
+      }
       var results = [];
       var solvedCount = 0;
       var skippedCount = 0;
       var failedCount = 0;
       var attempted = false;
 
-      for (var index = 0; index < list.length; index += 1) {
-        var result;
-        try {
-          result = await callSolveQuestion(list[index], context, index, attempted);
-        } catch (questionError) {
-          callWarn('题目处理异常，继续下一题。', questionError);
-          result = { index: index, solved: false, skipped: false, reason: 'question-failed' };
+      var batchIndex = 0;
+      while (batchIndex < list.length) {
+        if (attempted) {
+          // 批间延迟一次（批内并发）：与串行模式"每题间隔"同级的防突发节奏。
+          await callDelay(callAnswerInterval(context));
         }
-        results.push(result);
-        if (result.solved) {
-          solvedCount += 1;
-          attempted = true;
-        } else if (result.skipped) {
-          skippedCount += 1;
+        var batch = list.slice(batchIndex, batchIndex + concurrency);
+        var batchResults;
+        if (concurrency === 1) {
+          batchResults = [];
+          try {
+            batchResults.push(await callSolveQuestion(batch[0], context, batchIndex, false));
+          } catch (questionError) {
+            callWarn('题目处理异常，继续下一题。', questionError);
+            batchResults.push({ index: batchIndex, solved: false, skipped: false, reason: 'question-failed' });
+          }
         } else {
-          failedCount += 1;
+          batchResults = await Promise.all(batch.map(function solveOne(question, offset) {
+            var index = batchIndex + offset;
+            return callSolveQuestion(question, context, index, false)
+              .catch(function (questionError) {
+                callWarn('题目处理异常，继续下一题。', questionError);
+                return { index: index, solved: false, skipped: false, reason: 'question-failed' };
+              });
+          }));
         }
-        // An API failure/no-answer still consumed an attempt slot, so a burst
-        // of requests cannot bypass the configured inter-question interval.
-        if (result.reason !== 'already-answered') {
-          attempted = true;
+        for (var resultIndex = 0; resultIndex < batchResults.length; resultIndex += 1) {
+          var result = batchResults[resultIndex];
+          results.push(result);
+          if (result.solved) {
+            solvedCount += 1;
+            attempted = true;
+          } else if (result.skipped) {
+            skippedCount += 1;
+          } else {
+            failedCount += 1;
+          }
+          // An API failure/no-answer still consumed an attempt slot, so a burst
+          // of requests cannot bypass the configured inter-question interval.
+          if (result.reason !== 'already-answered') {
+            attempted = true;
+          }
         }
+        batchIndex += concurrency;
       }
 
       var submitResult = null;

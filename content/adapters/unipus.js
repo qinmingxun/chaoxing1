@@ -1550,7 +1550,7 @@ const STORAGE_AUTO_ANSWER_KEY = "autoAnswer";
 // 一轮成功（started:true）后锁定；新题到达（scheduleAutoAnswerForNewQuestions）解锁
 // 并防抖合并同一页多题；事件连发时 2 秒节流；destroy/提交成功后 resetAutoAnswerState。
 const AUTO_ANSWER_RETRY_THROTTLE_MS = 2000;
-const AUTO_ANSWER_DEBOUNCE_MS = 1500;
+const AUTO_ANSWER_DEBOUNCE_MS = 800;
 const autoAnswerState = {
   started: false,
   running: null,
@@ -1801,9 +1801,25 @@ export async function runAutoAnswer(ctx) {
     return { started: false, reason: "solver-unavailable" };
   }
 
+  // 批间间隔：并发批之间保持短间隔（不影响单题答案质量，仅防请求突发；
+  // 显式配置 answerIntervalMs 时尊重用户配置）。
+  let solverContext = context;
+  if (context && context.settings) {
+    const configured = context.settings.answerIntervalMs;
+    if (configured === undefined || configured === null) {
+      solverContext = {
+        ...context,
+        settings: { ...context.settings, answerIntervalMs: 800 },
+      };
+    }
+  }
+
   let summary = null;
   try {
-    summary = await solver.solveQuestions(questions, context, { autoSubmit: false });
+    // 并发 3 求解（quiz-solver 仅在该选项显式传入时并发，学习通等平台不受影响）：
+    // DeepSeek 答案质量与并发无关，只缩短多题一页的墙钟时间。
+    summary = await solver.solveQuestions(questions, solverContext,
+      { autoSubmit: false, concurrency: 3 });
   } catch (_error) {
     unipusWarn(context, "solveQuestions 调用失败，跳过答案注入接线。");
     return { started: false, reason: "solve-failed" };
@@ -2074,7 +2090,7 @@ function installPageFillObserver(context, answers) {
 // class 含 submit/confirm 的元素；文本须含"提交"且不含"反馈/评论/意见"等干扰词，
 // 且元素必须可见、未禁用。找不到按钮时仅警告一次（用户可提供 selector 补充）。
 
-const AUTO_SUBMIT_CLICK_DELAY_MS = 3000; // 填答完成后等 3 秒（框架状态同步）再点击
+const AUTO_SUBMIT_CLICK_DELAY_MS = 2000; // 填答完成后等 2 秒（框架状态同步）再点击
 const autoSubmitState = { timer: null, fired: false };
 
 function resetAutoSubmitState() {
@@ -2229,8 +2245,8 @@ function clickSubmitButton(context) {
 // 先等 1.5 秒（提交响应渲染），再 800ms 轮询等待按钮出现，出现即点击一次，
 // 60 秒超时停止（最后一题场景）。点击后平台切下一页 → 新题拦截 →
 // 新一轮自动答题（闭环，见 handleQuestionDataPayload → scheduleAutoAnswerForNewQuestions）。
-const AUTO_CONTINUE_FIRST_DELAY_MS = 1500;
-const AUTO_CONTINUE_POLL_MS = 800;
+const AUTO_CONTINUE_FIRST_DELAY_MS = 1000;
+const AUTO_CONTINUE_POLL_MS = 500;
 const AUTO_CONTINUE_TIMEOUT_MS = 60 * 1000;
 const autoContinueState = { timer: null, deadline: 0, clicked: false };
 
