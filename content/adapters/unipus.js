@@ -2233,8 +2233,34 @@ function collectRecordButtons(doc) {
     } catch (_error) {
       children = [];
     }
-    // 用户实测：第 2 个子元素是麦克风按钮；回退取第 1 个或组本身。
-    const target = children.length >= 2 ? children[1] : (children[0] || group);
+    // 用户实测：第 2 个子元素是麦克风按钮（.record-button-group > div:nth-child(2)
+    // 内 div > span > svg）。点击目标取该元素的【最深子元素】（如 svg）：
+    // 平台的原生 click 监听常绑在深层元素上，点外层 div 事件不经过深层元素、
+    // 监听不触发；点最深元素会冒泡覆盖所有祖先（React 委托同样命中）。
+    const wrapper = children.length >= 2 ? children[1] : (children[0] || group);
+    let target = wrapper;
+    if (wrapper && typeof wrapper.querySelectorAll === "function") {
+      const descendants = safeQueryAll(wrapper, "*");
+      let deepest = null;
+      let deepestDepth = -1;
+      for (const descendant of descendants) {
+        let depth = 0;
+        let node = descendant;
+        try {
+          while (node && node.parentElement && node !== wrapper) {
+            depth += 1;
+            node = node.parentElement;
+          }
+        } catch (_error) {
+          depth = 0;
+        }
+        if (depth > deepestDepth) {
+          deepestDepth = depth;
+          deepest = descendant;
+        }
+      }
+      if (deepest) target = deepest;
+    }
     if (target) buttons.push(target);
   }
   return buttons;

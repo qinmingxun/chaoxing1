@@ -1356,6 +1356,36 @@
     }
   }
 
+  // ---- MediaRecorder 观测 ----
+  // 覆写构造器记录首次构造（录音真正开始的信号）：流来源为合成流（fakeStream
+  // 标记）说明音频注入生效；来源为其他（如真实麦克风/iframe 流）说明平台
+  // 录音路径未经过本覆写，需要进一步适配。
+  function installMediaRecorderProbe() {
+    var OriginalRecorder = globalWindow.MediaRecorder;
+    if (!OriginalRecorder || OriginalRecorder.__courseHelperProbe) {
+      return;
+    }
+    var probed = false;
+    function MediaRecorderProbe(stream, options) {
+      if (!probed) {
+        probed = true;
+        var source = '未知';
+        try {
+          source = stream && stream.fakeStream === true ? '合成音频流' :
+            (stream && stream.getAudioTracks && stream.getAudioTracks().length ? '其他音频流（真实麦克风或 iframe）' : '无音频轨');
+        } catch (ignoredStreamReadError) {
+          source = '未知';
+        }
+        console.log('[course-helper] MAIN bridge：MediaRecorder 已构造（平台开始录音，流来源=' + source + '）。');
+      }
+      return new OriginalRecorder(stream, options);
+    }
+    MediaRecorderProbe.prototype = OriginalRecorder.prototype;
+    MediaRecorderProbe.isTypeSupported = OriginalRecorder.isTypeSupported;
+    MediaRecorderProbe.__courseHelperProbe = true;
+    globalWindow.MediaRecorder = MediaRecorderProbe;
+  }
+
   function disposeBridge() {
     if (state.disposed || state.disposing) {
       return;
@@ -1492,4 +1522,6 @@
   // 合成音频流注入（u校园语音题）：不经过真实麦克风（无权限弹窗、
   // 无环境噪声），平台 MediaRecorder 录到程序生成的音频轨。
   installFakeAudioStream();
+  // MediaRecorder 观测：确认平台录音是否真正开始、流来源是否为本覆写。
+  installMediaRecorderProbe();
 })(typeof window !== 'undefined' ? window : null);
