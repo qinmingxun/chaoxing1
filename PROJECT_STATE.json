@@ -1,0 +1,219 @@
+{
+  "agents": {
+    "10": {
+      "status": "PASS",
+      "files": [
+        "content/quiz-solver.js"
+      ],
+      "evidence": "node --check; quiz-core-smoke-ok"
+    },
+    "11": {
+      "status": "PASS",
+      "files": [
+        "content/quiz-solver.js"
+      ],
+      "evidence": "rg SECTION; node --check; quiz-call-smoke-ok"
+    },
+    "12": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/chaoxing.js"
+      ],
+      "evidence": "node --check; chaoxing-skeleton-contract-ok"
+    },
+    "13": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/chaoxing.js"
+      ],
+      "evidence": "node --check; video-report-main-smoke-ok; chaoxing-task-wiring-ok"
+    },
+    "14": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/chaoxing.js"
+      ],
+      "evidence": "node --check; video-play-main-smoke-ok; route-video-play-ok; route-audio-ok; route-video-report-ok"
+    },
+    "15": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/chaoxing.js",
+        "content/loader.js"
+      ],
+      "evidence": "node --check; quiz-pc-e2e-ok; quiz-finished-branch-ok; quiz-solver-unavailable-branch-ok; loader-shared-modules-wiring-ok"
+    },
+    "16": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/chaoxing.js"
+      ],
+      "evidence": "node --check; scene-A-phone-ok; scene-F-editor-bridge-ok; scene-B-work-ok; scene-C-exam-ok; matches-route-ok; regressions-ok"
+    },
+    "17": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/chaoxing.js"
+      ],
+      "evidence": "node --check; font-smoke-11-scenarios-ok; workid-decrypt-unavailable-skip-ok; workid-no-encrypted-passes-to-quiz-ok; regressions-ok"
+    },
+    "18": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/zhihuishu.js",
+        "content/loader.js"
+      ],
+      "evidence": "node --check; zhs-smoke-34-ok; volume-0-not-muted-verified; keep-alive-loader-wiring-ok"
+    },
+    "19": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/unipus.js"
+      ],
+      "evidence": "node --check; unipus-smoke-10-ok; getQuestions-3-tier-verified; event-contract-aligned"
+    },
+    "20": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/unipus.js"
+      ],
+      "evidence": "node --check x2; ucampus-e2e-16-ok; auto-answer-trigger-ok; auto-answer-lock-ok; auto-answer-destroy-ok"
+    },
+    "21": {
+      "status": "PASS",
+      "files": [
+        "popup/popup.html",
+        "popup/popup.css"
+      ],
+      "evidence": "10-storage-keys-aligned; no-external-resources; no-inline-js; no-duplicate-id"
+    },
+    "22": {
+      "status": "PASS",
+      "files": [
+        "popup/popup.js"
+      ],
+      "evidence": "node --check; popup-smoke-66-ok; preserve-3-keys-verified"
+    },
+    "23": {
+      "status": "PASS",
+      "files": [
+        "fixtures/test-page.html"
+      ],
+      "evidence": "708-lines; 51-selector-hits; no-external-resources; inline-js-check-ok"
+    },
+    "24": {
+      "status": "PASS",
+      "files": [
+        "content/adapters/chaoxing.js"
+      ],
+      "evidence": "13-js-check-ok; 3-json-ok; contracts-5-ok; smokes-47-ok-verified-with-hook; D1-fixed-by-main"
+    },
+    "25": {
+      "status": "PASS",
+      "files": [
+        "README.md"
+      ],
+      "evidence": "171-lines; 13-keys-covered; no-real-key; 9-sections-aligned; honest-claims-verified"
+    },
+    "26": {
+      "status": "PASS",
+      "files": [
+        "background/service-worker.js"
+      ],
+      "evidence": "13-js-check-ok; sensitive-scan-verified; spec80-all-pass; destroy-cleanup-complete; O4-fixed-by-main"
+    },
+    "27": {
+      "status": "PASS",
+      "files": [
+        "content/main-world-bridge.js"
+      ],
+      "evidence": "101-101-coverage; B1-B5-accepted; B3-alert-override-fixed-by-main; alert-override-enabled-ok; alert-restore-ok; bridge-regression-16-ok"
+    },
+    "28": {
+      "status": "PASS",
+      "files": [
+        "FINAL_AUDIT.md"
+      ],
+      "evidence": "json.tool-ok; 6-aux-files-complete; 29-agent-evidence-traceable; sensitive-scan-0; 13-syntax-ok; PROJECT-COMPLETE"
+    },
+    "00": {
+      "status": "PASS",
+      "files": [
+        "spec/FULL_SPEC.md"
+      ],
+      "evidence": "spec/INDEX.md"
+    },
+    "01": {
+      "status": "PASS",
+      "files": [
+        "CONTRACTS.md",
+        "PROJECT_PLAN.md",
+        "PROJECT_STATE.json",
+        "AGENT_STATUS.md",
+        "TEST_REPORT.md",
+        "REMAINING_TODO.md"
+      ],
+      "evidence": "TEST_REPORT.md"
+    },
+    "02": {
+      "status": "PASS",
+      "files": [
+        "manifest.json"
+      ],
+      "evidence": "manifest.json; manifest-contract-ok"
+    },
+    "03": {
+      "status": "PASS",
+      "files": [
+        "background/service-worker.js"
+      ],
+      "evidence": "node --check; service-worker-contract-ok"
+    },
+    "04": {
+      "status": "PASS",
+      "files": [
+        "lib/md5.js"
+      ],
+      "evidence": "node --check; md5-vectors-ok"
+    },
+    "05": {
+      "status": "PASS",
+      "files": [
+        "lib/typr.js",
+        "lib/table.json"
+      ],
+      "evidence": "node --check; json.tool; typr-table-contract-ok"
+    },
+    "06": {
+      "status": "PASS",
+      "files": [
+        "content/loader.js"
+      ],
+      "evidence": "node --check; loader-contract-ok"
+    },
+    "07": {
+      "status": "PASS",
+      "files": [
+        "content/main-world-bridge.js"
+      ],
+      "evidence": "node --check; bridge-contract-ok"
+    },
+    "08": {
+      "status": "PASS",
+      "files": [
+        "content/keep-alive.js"
+      ],
+      "evidence": "node --check; keep-alive-contract-ok"
+    },
+    "09": {
+      "status": "PASS",
+      "files": [
+        "content/video-manager.js"
+      ],
+      "evidence": "node --check; video-manager-contract-ok"
+    }
+  },
+  "next": null,
+  "blocked": [],
+  "last_updated": "2026-10-18T04:37:16.373Z"
+}

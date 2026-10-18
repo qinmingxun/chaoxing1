@@ -1,0 +1,271 @@
+/* ============================================================
+   刷课助手 popup 设置面板 —— 暗色简洁 UI
+   纯原生 CSS：无外部字体 / 图标库 / 任何外部请求
+   ============================================================ */
+
+:root {
+  --bg: #1e1e1e;
+  --bg-card: #252526;
+  --bg-input: #2d2d30;
+  --border: #3a3a3a;
+  --text: #e0e0e0;
+  --text-dim: #b3b3b3;
+  --text-faint: #8a8a8a;
+  --accent: #4f8cff;
+  --accent-hover: #3f7cf0;
+  --accent-active: #376bd9;
+  --ok: #5bd48a;
+  --err: #ff7a7a;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  width: 340px;
+  max-height: 560px;
+  overflow-y: auto;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* 滚动条 */
+body::-webkit-scrollbar { width: 8px; }
+body::-webkit-scrollbar-track { background: transparent; }
+body::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+
+/* ---------- 头部 ---------- */
+header { padding: 14px 16px 12px; border-bottom: 1px solid var(--border); }
+header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+.subtitle { margin: 2px 0 0; font-size: 12px; color: var(--text-faint); }
+
+/* ---------- 主体 ---------- */
+main { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px 14px; }
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+}
+
+/* ---------- 字段通用 ---------- */
+.field { margin-bottom: 12px; }
+.field:last-child { margin-bottom: 0; }
+
+.field > label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+fieldset.field { border: none; margin-bottom: 12px; padding: 0; min-width: 0; }
+fieldset.field legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.hint { margin: 6px 0 0; font-size: 11px; color: var(--text-faint); }
+
+/* ---------- 文本 / 数字输入 ---------- */
+.text-input {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.text-input:focus { border-color: var(--accent); }
+.text-input::placeholder { color: #6e6e6e; }
+
+.text-input.mono {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.text-input.num { -moz-appearance: textfield; appearance: textfield; }
+.text-input.num::-webkit-inner-spin-button,
+.text-input.num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+.input-row { display: flex; align-items: center; gap: 8px; }
+.input-row .text-input { flex: 1; min-width: 0; }
+.suffix-label { flex-shrink: 0; font-size: 12px; color: var(--text-faint); }
+
+/* ---------- API Key 显示 / 隐藏（纯 CSS checkbox hack，无 JS 依赖） ---------- */
+.pwd-toggle { position: absolute; opacity: 0; pointer-events: none; }
+
+/* 默认掩码显示；-webkit-text-security 仅影响视觉，输入值为明文 */
+.pwd-toggle + .input-row .text-input { -webkit-text-security: disc; }
+.pwd-toggle:checked + .input-row .text-input { -webkit-text-security: none; }
+
+.eye-btn {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.eye-btn:hover { border-color: var(--accent); color: var(--text); }
+.pwd-toggle:checked + .input-row .eye-btn { border-color: var(--accent); color: var(--accent); }
+.pwd-toggle:focus-visible + .input-row .eye-btn { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.eye-btn .eye-hide { display: none; }
+.pwd-toggle:checked + .input-row .eye-btn .eye-hide { display: inline; }
+.pwd-toggle:checked + .input-row .eye-btn .eye-show { display: none; }
+
+/* ---------- 倍速滑杆 ---------- */
+.value-badge { color: var(--accent); font-weight: 600; }
+
+.range {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 20px;
+  margin: 2px 0 0;
+  background: transparent;
+  cursor: pointer;
+}
+.range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.range:hover::-webkit-slider-thumb { background: var(--accent-hover); }
+.range:active::-webkit-slider-thumb { background: var(--accent-active); }
+.range:focus-visible { outline: none; }
+.range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.35); }
+.range::-moz-range-track { height: 4px; border-radius: 2px; background: var(--border); }
+.range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.range-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* ---------- 开关（纯 CSS：checkbox 隐藏 + 轨道 / 滑块） ---------- */
+.switch-input { position: absolute; opacity: 0; pointer-events: none; }
+
+.field > label.switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.switch-label { font-size: 13px; }
+
+.switch .track {
+  position: relative;
+  flex-shrink: 0;
+  width: 38px;
+  height: 22px;
+  border-radius: 11px;
+  background: #3f3f46;
+  transition: background-color 0.2s;
+}
+.switch .thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #9a9a9a;
+  transition: transform 0.2s, background-color 0.2s;
+}
+.switch-input:checked + .switch .track { background: var(--accent); }
+.switch-input:checked + .switch .thumb { transform: translateX(16px); background: #ffffff; }
+.switch-input:focus-visible + .switch .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- 单选（原生 radio + accent 简单美化） ---------- */
+.radio-row { display: flex; gap: 18px; }
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.radio input[type="radio"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/* ---------- 保存按钮 / 状态提示 ---------- */
+.actions { display: flex; flex-direction: column; gap: 8px; }
+
+.primary-btn {
+  width: 100%;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.primary-btn:hover { background: var(--accent-hover); }
+.primary-btn:active { background: var(--accent-active); }
+
+.status {
+  margin: 0;
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.status.ok { color: var(--ok); }
+.status.error { color: var(--err); }

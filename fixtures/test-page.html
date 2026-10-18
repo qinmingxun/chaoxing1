@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>课程助手扩展 · 本地免登录验证页（fixture）</title>
+<!-- [SECTION:FIXTURE] 本地免登录验证页：单文件、无外部资源、全部原生 JS。
+     用于验证扩展的：视频逻辑（自动播放/倍速/ended 跳转）、学习通 PC 测验
+     （提取→AI→填答→提交，spec/30d 选择器）、u校园提交拦截+答案注入
+     （spec/40 payload 结构）、keep-alive 挂机弹窗自动点击。
+     本页是 MAIN world 页面，扩展 content script 经 manifest 的
+     localhost/127.0.0.1 matches 注入；本页只做真实 DOM 结构与标准事件，
+     不拦截/不覆写任何扩展相关全局。 -->
+<style>
+/* ===== 页面基础 ===== */
+:root {
+  --line: #e3e6ea;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --accent: #2f6fed;
+  --text: #23272e;
+  --muted: #5c6470;
+  --ok: #0a7d33;
+  --warn: #b3541e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+.page { max-width: 940px; margin: 0 auto; padding: 24px 16px 60px; }
+h1 { font-size: 22px; margin: 0 0 6px; }
+.sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+
+/* 扩展注入状态 */
+#extStatus {
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #eef1f5;
+  margin-bottom: 16px;
+}
+#extStatus.ok { background: #e7f6ec; color: var(--ok); }
+#extStatus.warn { background: #fdf0e4; color: var(--warn); }
+
+/* 分区卡片 */
+section {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 18px 20px;
+  margin-bottom: 18px;
+}
+section h2 {
+  font-size: 16px;
+  margin: 0 0 8px;
+  border-left: 4px solid var(--accent);
+  padding-left: 8px;
+}
+.usage {
+  font-size: 13px;
+  color: var(--muted);
+  background: #f4f6f8;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 14px;
+}
+button {
+  cursor: pointer;
+  border: 1px solid var(--accent);
+  background: #fff;
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 7px 16px;
+  font-size: 14px;
+  margin: 0 8px 8px 0;
+}
+button:hover { background: #eef4ff; }
+button.primary { background: var(--accent); color: #fff; }
+
+/* 页面公共提示区 */
+#pageNotice {
+  font-size: 14px;
+  min-height: 22px;
+  margin: 0 0 12px;
+  color: var(--ok);
+  font-weight: bold;
+}
+#pageNotice.flash { animation: noticeFlash 2s; }
+@keyframes noticeFlash {
+  0% { background: #dff3e7; }
+  100% { background: transparent; }
+}
+
+/* ===== 一、视频区 ===== */
+video {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  height: auto;
+  background: #0b0e13;
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+#videoStatus { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+
+/* ===== 二、学习通 PC 测验区（结构模拟真实学习通页面） ===== */
+.newTestCon {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: #fbfcfd;
+}
+.newTestTitle .testTit_status {
+  display: inline-block;
+  background: #fff3cd;
+  color: #856404;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 13px;
+}
+.CeYan .TiMu {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: #fdfefe;
+}
+.Zy_TItle { font-weight: bold; font-size: 15px; margin-bottom: 8px; }
+.Zy_ulTop { list-style: none; margin: 0; padding: 0; }
+.Zy_ulTop li {
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  border: 1px solid #e6e9ed;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  background: #fff;
+}
+.Zy_ulTop li:hover { border-color: var(--accent); }
+/* 已答标记：与学习通一致的 aria-label="checked" 高亮 */
+.Zy_ulTop li[aria-label="checked"] { background: #e7f6ec; border-color: #4caf7d; }
+.Zy_ulTop li a { color: inherit; text-decoration: none; display: block; }
+.Zy_ulTk .XztiHover1 textarea {
+  width: 100%;
+  min-height: 64px;
+  border: 1px solid #ccd3db;
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+}
+.ZY_sub { margin-top: 4px; }
+.ZY_sub .btnSubmit { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* 学习通提交确认弹窗（初始隐藏，点击 btnSubmit 后显示） */
+#confirmSubWin {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 20, 28, 0.45);
+  z-index: 60;
+}
+#confirmSubWin > div {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#confirmSubWin > div > div {
+  background: #fff;
+  border-radius: 8px;
+  padding: 26px 30px;
+  text-align: center;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+#confirmSubWin .bluebtn {
+  display: inline-block;
+  margin-top: 14px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 6px;
+  padding: 8px 26px;
+  text-decoration: none;
+  font-size: 14px;
+}
+
+/* ===== 四、挂机弹窗（每次动态插入 DOM，供 MutationObserver 观察） ===== */
+.idle-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 20, 28, 0.5);
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.idle-modal-box {
+  background: #fff;
+  border-radius: 8px;
+  padding: 24px 28px;
+  text-align: center;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.28);
+  max-width: 380px;
+}
+.idle-modal-text { margin: 0 0 16px; font-size: 15px; }
+
+/* ===== 五、页面日志区 ===== */
+#logBox {
+  background: #10151c;
+  color: #cfe3ff;
+  font-family: Consolas, Menlo, "Courier New", monospace;
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 10px 12px;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>课程助手扩展 · 本地免登录验证页（fixture）</h1>
+  <p class="sub">
+    本页为扩展 content script 的 MAIN world 页面：manifest.json 的 matches 含
+    <code>*://localhost/*</code> 与 <code>*://127.0.0.1/*</code>，content script 会自动注入本页。
+    本页无任何外部资源（video 不带真实 src），所有交互使用真实 DOM 结构与标准事件，
+    兼容内容脚本的 <code>el.click()</code> 与 value 填写；本页不拦截、不覆写任何扩展相关全局。
+    验证时请同时打开开发者工具控制台（页面日志双写：本页日志区 + console）。
+  </p>
+  <div id="extStatus">扩展注入状态：检测中（若扩展已加载，应收到 source 为 course-helper 的消息）……</div>
+  <div id="pageNotice"></div>
+
+  <!-- ================= 一、视频区 ================= -->
+  <section id="sec-video">
+    <h2>一、视频区：验证自动播放 / 倍速 / ended 自动跳转</h2>
+    <p class="usage">
+      用途：验证扩展视频逻辑——autoVideo 开启后应调用 <code>video.play()</code>（本页 video 无 src，
+      play() 返回 rejected promise 属预期，本页会捕获并记录）；videoSpeed 注入后 <code>playbackRate</code>
+      应变为设定值；收到 ended 事件后扩展应自动点击“下一集”按钮。<br>
+      验证方法：点击“播放”模拟播放状态（派发标准 play 事件）；点击“模拟 ended”派发标准 ended 事件；
+      观察页面日志区中 video 事件、“下一集”按钮点击时序与 playbackRate 变化。
+    </p>
+    <!-- video 不带真实 src：无外部资源依赖；播放状态由“播放”按钮程序化模拟 -->
+    <video id="fixtureVideo" muted controls playsinline></video>
+    <div id="videoStatus">当前状态：等待操作。</div>
+    <div>
+      <button type="button" class="primary" id="btnSimPlay">播放</button>
+      <button type="button" id="btnSimEnded">模拟 ended</button>
+      <button type="button" id="btnNextEpisode">下一集</button>
+    </div>
+  </section>
+
+  <!-- ================= 二、学习通 PC 测验区 ================= -->
+  <section id="sec-quiz">
+    <h2>二、学习通 PC 测验区：验证提取 → AI → 填答 → 提交（spec/30d 选择器）</h2>
+    <p class="usage">
+      用途：验证学习通 PC 测验全流程。DOM 选择器与真实学习通一致：状态文本
+      <code>.newTestCon .newTestTitle .testTit_status</code>、题目容器 <code>.CeYan</code> 内的
+      <code>.TiMu</code>、题干 <code>.Zy_TItle.clearfix &gt; div</code>（题型从【单选题】等前缀提取）、
+      选项 <code>.Zy_ulTop li a</code>（html 含“A.”前缀需清洗，点击目标为 a 的父级 li）、
+      填空 <code>.Zy_ulTk .XztiHover1</code> 下的 textarea、提交 <code>.ZY_sub .btnSubmit</code>、
+      保存 <code>.ZY_sub .btnSave</code>、确认弹窗 <code>#confirmSubWin &gt; div &gt; div &gt; a.bluebtn</code>。<br>
+      验证方法：扩展 autoAnswer 开启后应自动点击选项 li（li 变 <code>aria-label="checked"</code>，模拟学习通已答标记，
+      供扩展已答检测跳过）并填入填空 textarea；autoSubmit 开启后应自动点击“提交”再点弹窗“确定”，
+      状态文本变为“已完成”。全程观察页面日志区；也可手动点击各按钮验证页面自身逻辑。
+    </p>
+
+    <!-- 状态文本：初始“待做”，bluebtn 确认后变“已完成” -->
+    <div class="newTestCon">
+      <div class="newTestTitle">
+        <div class="testTit_status">待做</div>
+      </div>
+    </div>
+
+    <div class="CeYan">
+      <!-- 第 1 题：单选 -->
+      <div class="TiMu">
+        <div class="Zy_TItle clearfix">
+          <div>【单选题】1+1=?（2分）</div>
+        </div>
+        <ul class="Zy_ulTop">
+          <li><a href="javascript:void(0)">A. 2</a></li>
+          <li><a href="javascript:void(0)">B. 3</a></li>
+          <li><a href="javascript:void(0)">C. 4</a></li>
+          <li><a href="javascript:void(0)">D. 5</a></li>
+        </ul>
+      </div>
+
+      <!-- 第 2 题：多选 -->
+      <div class="TiMu">
+        <div class="Zy_TItle clearfix">
+          <div>【多选题】以下哪些是偶数？（4分）</div>
+        </div>
+        <ul class="Zy_ulTop">
+          <li><a href="javascript:void(0)">A. 2</a></li>
+          <li><a href="javascript:void(0)">B. 3</a></li>
+          <li><a href="javascript:void(0)">C. 4</a></li>
+          <li><a href="javascript:void(0)">D. 5</a></li>
+        </ul>
+      </div>
+
+      <!-- 第 3 题：填空 -->
+      <div class="TiMu">
+        <div class="Zy_TItle clearfix">
+          <div>【填空题】中国的首都是____。（2分）</div>
+        </div>
+        <div class="Zy_ulTk">
+          <div class="XztiHover1">
+            <textarea rows="3" placeholder="请在此输入答案（扩展会经此 textarea 填入）"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- 提交 / 保存按钮 -->
+      <div class="ZY_sub">
+        <button type="button" class="btnSubmit">提交</button>
+        <button type="button" class="btnSave">保存</button>
+      </div>
+    </div>
+
+    <!-- 确认弹窗：初始隐藏，点击 btnSubmit 后显示；点击 bluebtn 后隐藏并把状态文本改为“已完成” -->
+    <div id="confirmSubWin">
+      <div>
+        <div>
+          <p>确认提交本次测验？</p>
+          <a class="bluebtn" href="javascript:void(0)">确定</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 三、u校园提交拦截区 ================= -->
+  <section id="sec-submit">
+    <h2>三、u校园提交拦截区：验证答案注入改写 payload（spec/40 结构）</h2>
+    <p class="usage">
+      用途：验证 u校园提交拦截 + 答案注入核心机制。payload 按 spec/40 结构：
+      <code>{quesDatas:[{answer:"&lt;答案树JSON字符串&gt;", ...}], usedTime:1, ...}</code>——
+      answer 为含 value 叶子的答案树 JSON 字符串（可嵌套 children），本页共 3 个 value 叶子
+      （先序位置：quesDatas[0] 内 2 个嵌套叶子、quesDatas[1] 内 1 个深层嵌套叶子），
+      初始均为空数组，usedTime 初始为 1。<br>
+      验证方法：点击“模拟提交”后观察日志：① 发送前 body（value 为空数组、usedTime=1）；
+      ② XHR 响应状态（本地 python http.server 对 POST 返回 501，属预期，页面只显示状态即可）；
+      ③ 若扩展已注入，扩展 MAIN bridge 拦截改写后应广播 <code>course-helper:main:ucampus-submit</code>
+      消息，本页会打印改写后 payload（value 已按先序填入答案队列、usedTime 已改为 60–120 随机值），
+      并打印答案队列注入消息 <code>course-helper:main:set-ucampus-answer-queue</code> 的答案顺序供对照。
+    </p>
+    <button type="button" class="primary" id="btnMockSubmit">模拟提交</button>
+  </section>
+
+  <!-- ================= 四、挂机弹窗区 ================= -->
+  <section id="sec-idle">
+    <h2>四、挂机弹窗区：验证 keep-alive 自动点击“长时间未操作”弹窗</h2>
+    <p class="usage">
+      用途：验证保活系统（spec/40）：MutationObserver 监听新增节点，文本含“长时间未操作”等关键词时，
+      约 300ms 后自动点击其内的“确定”/“继续”按钮。<br>
+      验证方法：点击“显示挂机弹窗”——弹窗每次都以全新节点动态插入 DOM（保证 MutationObserver
+      的 childList 一定能观察到）。若扩展已注入，弹窗应在约 300ms 后自动消失并显示提示
+      “弹窗已处理”（日志区记录弹窗存活时长）；若扩展未注入，请手动点击“确定”或“继续”按钮，
+      弹窗同样隐藏并显示提示。
+    </p>
+    <button type="button" id="btnShowIdle">显示挂机弹窗</button>
+  </section>
+
+  <!-- ================= 五、页面日志区 ================= -->
+  <section id="sec-log">
+    <h2>五、页面日志区（验证时观察这里 + 控制台）</h2>
+    <p class="usage">
+      所有页面交互、video 事件、扩展 course-helper 消息（postMessage / CustomEvent 通道）均按时间戳记录在此，
+      控制台同步输出（前缀 [fixture]）。
+    </p>
+    <div id="logBox"></div>
+  </section>
+
+</div>
+
+<script>
+/* [SECTION:FIXTURE] 页面逻辑：全部原生 JS，IIFE 包裹避免污染全局；
+   不拦截/不覆写扩展相关全局（XHR、fetch、confirm、postMessage 等一概不动）。 */
+(function () {
+  'use strict';
+
+  /* ---------- 日志工具 ---------- */
+  var logBox = document.getElementById('logBox');
+  function pad2(n) { return String(n).length < 2 ? '0' + n : String(n); }
+  function ts() {
+    var d = new Date();
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) +
+      '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+  function log(msg) {
+    var line = document.createElement('div');
+    line.className = 'log-line';
+    line.textContent = '[' + ts() + '] ' + msg;
+    logBox.appendChild(line);
+    /* 最多保留 200 行，防日志爆页 */
+    while (logBox.children.length > 200) { logBox.removeChild(logBox.firstChild); }
+    logBox.scrollTop = logBox.scrollHeight;
+    console.log('[fixture] ' + msg);
+  }
+
+  /* ---------- 页面公共提示 ---------- */
+  var notice = document.getElementById('pageNotice');
+  var noticeTimer = null;
+  function showNotice(text) {
+    notice.textContent = '提示：' + text;
+    notice.classList.add('flash');
+    if (noticeTimer) { clearTimeout(noticeTimer); }
+    noticeTimer = setTimeout(function () { notice.classList.remove('flash'); }, 2000);
+    log('页面提示：' + text);
+  }
+
+  /* ---------- 扩展注入检测（CONTRACTS §2：消息必须带 source:"course-helper"） ---------- */
+  var extStatus = document.getElementById('extStatus');
+  var sawCourseHelper = false;
+  function markExtInjected(where) {
+    if (!sawCourseHelper) {
+      sawCourseHelper = true;
+      extStatus.textContent = '扩展注入状态：已检测到 course-helper 消息（通道：' + where + '），扩展已注入本页。';
+      extStatus.className = 'ok';
+    }
+  }
+
+  /* ============================================================
+     一、视频区：自动播放 / 倍速 / ended 跳转
+     视频不带真实 src（无外部资源）；“播放”按钮模拟播放状态：
+     尝试 video.play()（无 src 时浏览器返回 rejected promise，属预期并记录），
+     随后派发标准 play 事件并标记 dataset 状态，供扩展视频逻辑处理。
+     ============================================================ */
+  var video = document.getElementById('fixtureVideo');
+  var videoStatus = document.getElementById('videoStatus');
+  function updateVideoStatus() {
+    videoStatus.textContent = '当前状态：dataset.playing=' + (video.dataset.playing || 'false') +
+      '，paused=' + video.paused + '，playbackRate=' + video.playbackRate +
+      '（扩展倍速注入后 playbackRate 应变为 videoSpeed 设定值）';
+  }
+  /* 监听 video 标准事件并打印，用于观察扩展视频逻辑的行为 */
+  ['play', 'pause', 'ended', 'ratechange', 'loadedmetadata'].forEach(function (ev) {
+    video.addEventListener(ev, function () {
+      if (ev === 'ratechange') {
+        log('video 事件 ratechange：playbackRate=' + video.playbackRate + '（扩展倍速注入应修改此值）');
+      } else {
+        log('video 事件 ' + ev);
+      }
+      updateVideoStatus();
+    });
+  });
+  document.getElementById('btnSimPlay').addEventListener('click', function () {
+    log('点击“播放”：尝试 video.play()（video 无 src，promise 被拒属预期）');
+    var p = video.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(function (err) {
+        log('video.play() 被拒（无 src，预期内）：' + (err && err.name ? err.name : 'unknown'));
+      });
+    }
+    /* 程序化模拟播放状态：标准 Event 构造器派发真实 DOM 事件 */
+    video.dataset.playing = 'true';
+    video.dispatchEvent(new Event('play'));
+    updateVideoStatus();
+  });
+  document.getElementById('btnSimEnded').addEventListener('click', function () {
+    log('点击“模拟 ended”：派发标准 ended 事件（扩展应据此自动跳转，点击“下一集”）');
+    video.dataset.playing = 'false';
+    video.dispatchEvent(new Event('ended'));
+    updateVideoStatus();
+  });
+  document.getElementById('btnNextEpisode').addEventListener('click', function () {
+    log('“下一集”按钮被点击（若紧随 ended 事件出现，即为扩展自动跳转）');
+    video.dataset.playing = 'false';
+    showNotice('已切换到下一集');
+    updateVideoStatus();
+  });
+
+  /* ============================================================
+     二、学习通 PC 测验区（spec/30d 选择器）
+     选项 li 点击 → aria-label="checked"（模拟学习通已答标记）；
+     全部用真实 DOM 事件，兼容内容脚本的 el.click()。
+     ============================================================ */
+  var titStatus = document.querySelector('.newTestCon .newTestTitle .testTit_status');
+  var confirmWin = document.getElementById('confirmSubWin');
+
+  /* 选项 li（.Zy_ulTop li）点击监听：a 的点击冒泡到父级 li */
+  document.querySelectorAll('.CeYan .Zy_ulTop li').forEach(function (li) {
+    li.addEventListener('click', function () {
+      var a = li.querySelector('a');
+      var text = a ? a.textContent.trim() : '';
+      var already = li.getAttribute('aria-label') === 'checked';
+      li.setAttribute('aria-label', 'checked');
+      log('选项 li 被点击：“' + text + '”，已设置 aria-label="checked"' +
+        (already ? '（此前已答，重复点击不改动）' : ''));
+    });
+  });
+
+  /* 填空 textarea（.Zy_ulTk .XztiHover1 下）输入监听：扩展填入答案时同样触发 */
+  document.querySelectorAll('.CeYan .Zy_ulTk .XztiHover1 textarea').forEach(function (ta) {
+    ta.addEventListener('input', function () {
+      log('填空题 textarea 值变化：' + ta.value + '（若扩展只设 value 未派发 input 事件则无此日志，可直接检查 textarea 值）');
+    });
+  });
+
+  /* 提交按钮：显示确认弹窗（初始隐藏） */
+  document.querySelector('.ZY_sub .btnSubmit').addEventListener('click', function () {
+    log('btnSubmit 被点击：显示确认弹窗 #confirmSubWin > div > div > a.bluebtn');
+    confirmWin.style.display = 'block';
+  });
+  /* 保存按钮：模拟保存（扩展 autoSubmit 关闭时使用） */
+  document.querySelector('.ZY_sub .btnSave').addEventListener('click', function () {
+    log('btnSave 被点击：模拟保存答案');
+    showNotice('答案已保存（模拟）');
+  });
+  /* 确认弹窗 bluebtn：隐藏弹窗，状态文本变“已完成” */
+  document.querySelector('#confirmSubWin > div > div > a.bluebtn').addEventListener('click', function () {
+    confirmWin.style.display = 'none';
+    titStatus.textContent = '已完成';
+    log('bluebtn 确认点击：弹窗已隐藏，状态文本 .testTit_status 已更新为“已完成”');
+  });
+
+  /* ============================================================
+     三、模拟提交（spec/40 payload 结构）
+     quesDatas[].answer 为答案树 JSON 字符串：节点含 children 数组则递归，
+     叶子节点含 value 属性（value 为数组）。value 初始均为空数组（等扩展注入），
+     usedTime 初始为 1（扩展注入后应为随机 60–120）。
+     value 叶子共 3 个，先序位置：
+       第 1 个：quesDatas[0].answer → children[0].value
+       第 2 个：quesDatas[0].answer → children[1].children[0].value
+       第 3 个：quesDatas[1].answer → children[0].children[0].children[0].value
+     ============================================================ */
+  function buildSubmitPayload() {
+    /* 第 1 棵答案树：2 个 value 叶子（平铺 + 一层嵌套） */
+    var answerTree1 = {
+      children: [
+        { value: [] },
+        { children: [ { value: [] } ] }
+      ]
+    };
+    /* 第 2 棵答案树：1 个 value 叶子（两层嵌套，验证先序） */
+    var answerTree2 = {
+      children: [
+        { children: [ { children: [ { value: [] } ] } ] }
+      ]
+    };
+    return {
+      quesDatas: [
+        { questionId: 'fixture-q1', qtype: 0, answer: JSON.stringify(answerTree1) },
+        { questionId: 'fixture-q2', qtype: 2, answer: JSON.stringify(answerTree2) }
+      ],
+      usedTime: 1,
+      explorationId: 'fixture-exploration-001',
+      clientType: 'web'
+    };
+  }
+  /* 按 spec/40 规则统计 payload 内 value 叶子数（先序） */
+  function countValueLeaves(payload) {
+    var n = 0;
+    (payload.quesDatas || []).forEach(function (q) {
+      try {
+        (function walk(node) {
+          if (node && typeof node === 'object') {
+            if (Array.isArray(node.children)) { node.children.forEach(walk); return; }
+            if (Object.prototype.hasOwnProperty.call(node, 'value') && Array.isArray(node.value)) { n++; }
+          }
+        })(JSON.parse(q.answer));
+      } catch (e) { /* 解析失败不计数 */ }
+    });
+    return n;
+  }
+
+  document.getElementById('btnMockSubmit').addEventListener('click', function () {
+    var payload = buildSubmitPayload();
+    var body = JSON.stringify(payload);
+    log('模拟提交：构建 payload（注入前）——usedTime=1，共 ' + countValueLeaves(payload) +
+      ' 个 value 叶子（先序），初始均为空数组');
+    log('发送前 body（注入前）：' + body);
+    /* 只读检查扩展答案缓存（spec/40：unsafeWindow.__UCAMPUS_ANSWER_CACHE__），不修改 */
+    try {
+      var cache = window.__UCAMPUS_ANSWER_CACHE__;
+      if (cache && Array.isArray(cache)) {
+        log('扩展答案缓存 __UCAMPUS_ANSWER_CACHE__：已注入，长度=' + cache.length +
+          '，答案队列=[' + cache.join(',') + ']（应依次填入先序第 1/2/3 个 value 叶子）');
+      } else {
+        log('扩展答案缓存 __UCAMPUS_ANSWER_CACHE__：未注入（扩展 MAIN bridge 尚未就位或未注入答案队列）');
+      }
+    } catch (e) {
+      log('检查 __UCAMPUS_ANSWER_CACHE__ 异常：' + e.message);
+    }
+    /* 原生 XHR POST 到相对路径；扩展 MAIN bridge 的 XHR 钩子会拦截并改写 body 后放行 */
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/course/api/v3/newExploration/submit', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function () {
+      log('XHR 响应：status=' + xhr.status + '（本地 python http.server 对 POST 返回 501 属预期，页面只显示状态）' +
+        '，响应体（截断 200 字符）：' + String(xhr.responseText).slice(0, 200));
+    };
+    xhr.onerror = function () {
+      log('XHR 网络错误（onerror）');
+    };
+    xhr.send(body);
+    log('XHR POST 已发出：/course/api/v3/newExploration/submit。' +
+      '扩展 MAIN bridge 拦截后应改写 value（按先序填入答案队列）与 usedTime（60–120 随机），' +
+      '并广播 course-helper:main:ucampus-submit——改写结果见下方“扩展改写”日志');
+  });
+
+  /* ============================================================
+     四、挂机弹窗（spec/40 keep-alive 验证）
+     每次都以全新节点动态插入 DOM，保证扩展 MutationObserver 的
+     childList 一定能观察到新增节点；关键词“长时间未操作”命中后，
+     扩展约 300ms 后自动点击其内“确定”/“继续”按钮。
+     ============================================================ */
+  document.getElementById('btnShowIdle').addEventListener('click', function () {
+    /* 若已有弹窗先移除（避免重复节点） */
+    document.querySelectorAll('.idle-modal').forEach(function (m) { m.remove(); });
+    var shownAt = Date.now();
+    var modal = document.createElement('div');
+    modal.className = 'idle-modal';
+    var box = document.createElement('div');
+    box.className = 'idle-modal-box';
+    var text = document.createElement('p');
+    text.className = 'idle-modal-text';
+    /* 文本必须包含 keep-alive 关键词“长时间未操作” */
+    text.textContent = '长时间未操作，为避免学习进度丢失，请确认是否继续学习。';
+    var btnOk = document.createElement('button');
+    btnOk.type = 'button';
+    btnOk.className = 'idle-btn-ok';
+    btnOk.textContent = '确定';
+    var btnGoOn = document.createElement('button');
+    btnGoOn.type = 'button';
+    btnGoOn.className = 'idle-btn-goon';
+    btnGoOn.textContent = '继续';
+    function handleClose(by) {
+      modal.remove();
+      var ms = Date.now() - shownAt;
+      showNotice('弹窗已处理');
+      log('挂机弹窗已关闭（' + by + '），显示→关闭耗时 ' + ms +
+        ' ms（扩展 keep-alive 自动点击通常约 300ms 后，人工点击通常更久）');
+    }
+    btnOk.addEventListener('click', function () { handleClose('点击“确定”'); });
+    btnGoOn.addEventListener('click', function () { handleClose('点击“继续”'); });
+    box.appendChild(text);
+    box.appendChild(btnOk);
+    box.appendChild(btnGoOn);
+    modal.appendChild(box);
+    document.body.appendChild(modal);
+    log('挂机弹窗已动态插入 DOM（全新节点，含关键词“长时间未操作”；' +
+      '扩展 keep-alive 应在约 300ms 后自动点击“确定”按钮）');
+  });
+
+  /* ============================================================
+     扩展消息监听（CONTRACTS §2：window.postMessage，对象带 source:"course-helper"）
+     页面作为 MAIN world 成员可观察到扩展桥接层的消息，用于验证：
+     - content → MAIN 的消息（如 course-helper:main:set-ucampus-answer-queue）
+     - MAIN → content 的消息（如 course-helper:main:ucampus-submit，含改写后 payload）
+     仅监听打印，绝不拦截/覆写。
+     ============================================================ */
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || typeof d !== 'object' || d.source !== 'course-helper' || !d.type) { return; }
+    markExtInjected('postMessage');
+    if (d.type === 'course-helper:main:ucampus-submit') {
+      var p = d.payload || {};
+      log('[扩展改写·postMessage] ucampus-submit：url=' + p.url +
+        '，usedTime=' + p.usedTime + '，answerCount=' + p.answerCount);
+      log('[扩展改写·postMessage] 改写后 payload：' + p.payload +
+        '（核对：value 应按先序填入答案队列，usedTime 应为 60–120 随机值）');
+    } else if (d.type === 'course-helper:main:set-ucampus-answer-queue') {
+      var q = d.payload || {};
+      var answers = Array.isArray(q.answers) ? q.answers.join(',') : '(空)';
+      log('[扩展消息·postMessage] 答案队列注入：answers=[' + answers +
+        ']（顺序应与先序 value 叶子填充结果一致）');
+    } else {
+      log('[扩展消息·postMessage] type=' + d.type);
+    }
+  });
+  /* 同名 CustomEvent 通道（桥接层转发给页面逻辑时使用 CustomEvent，detail 与 payload 一致）；
+     window 与 document 都监听，命中任意目标均能打印。 */
+  function onUcampusSubmitCustom(e) {
+    markExtInjected('CustomEvent');
+    var p = (e && e.detail) || {};
+    log('[扩展改写·CustomEvent] ucampus-submit：url=' + p.url +
+      '，usedTime=' + p.usedTime + '，answerCount=' + p.answerCount);
+    log('[扩展改写·CustomEvent] 改写后 payload：' + p.payload);
+  }
+  window.addEventListener('course-helper:main:ucampus-submit', onUcampusSubmitCustom);
+  document.addEventListener('course-helper:main:ucampus-submit', onUcampusSubmitCustom);
+
+  /* ---------- 初始化 ---------- */
+  updateVideoStatus();
+  log('fixture 页面已加载：四大验证区（视频 / 学习通测验 / u校园提交 / 挂机弹窗）就绪。' +
+    '扩展 content script 经 manifest 的 localhost/127.0.0.1 matches 注入本页；请观察本日志区与控制台。');
+  /* 1.5 秒后仍未见到扩展消息则提示 */
+  setTimeout(function () {
+    if (!sawCourseHelper) {
+      extStatus.textContent = '扩展注入状态：尚未检测到 course-helper 消息（请确认扩展已加载、开发者模式开启，然后刷新本页）。';
+      extStatus.className = 'warn';
+    }
+  }, 1500);
+})();
+</script>
+</body>
+</html>

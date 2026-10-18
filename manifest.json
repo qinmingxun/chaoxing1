@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "刷课助手",
+  "version": "1.0.0",
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.chaoxing.com/*",
+        "*://*.zhihuishu.com/*",
+        "*://*.unipus.cn/*",
+        "*://localhost/*",
+        "*://127.0.0.1/*"
+      ],
+      "js": ["content/loader.js"]
+    }
+  ],
+  "permissions": ["storage", "scripting"],
+  "host_permissions": [
+    "https://api.deepseek.com/*",
+    "*://*.chaoxing.com/*",
+    "*://*.zhihuishu.com/*",
+    "*://*.unipus.cn/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html"
+  }
+}

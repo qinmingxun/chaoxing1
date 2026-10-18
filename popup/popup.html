@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>刷课助手 · 设置</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>刷课助手</h1>
+    <p class="subtitle">设置面板</p>
+  </header>
+
+  <main>
+    <!-- 区块：AI 答题 -->
+    <section class="card">
+      <h2>AI 答题</h2>
+
+      <div class="field">
+        <label for="deepseekApiKey">DeepSeek API Key</label>
+        <input type="checkbox" id="apiKeyShow" class="pwd-toggle">
+        <div class="input-row">
+          <input type="text" id="deepseekApiKey" class="text-input mono"
+                 data-storage-key="deepseekApiKey"
+                 placeholder="&lt;YOUR_DEEPSEEK_API_KEY&gt;"
+                 autocomplete="off" spellcheck="false">
+          <label for="apiKeyShow" class="eye-btn" title="显示 / 隐藏 API Key">
+            <span class="eye-show">显示</span><span class="eye-hide">隐藏</span>
+          </label>
+        </div>
+        <p class="hint">密钥仅保存在本地 chrome.storage.local，仅用于请求 DeepSeek API</p>
+      </div>
+
+      <div class="field">
+        <label for="deepseekModel">模型</label>
+        <input type="text" id="deepseekModel" class="text-input"
+               data-storage-key="deepseekModel"
+               placeholder="deepseek-chat" autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="field">
+        <label for="answerIntervalMs">答题间隔</label>
+        <div class="input-row">
+          <input type="number" id="answerIntervalMs" class="text-input num"
+                 data-storage-key="answerIntervalMs"
+                 min="0" step="100" placeholder="5000">
+          <span class="suffix-label">毫秒</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 区块：视频 -->
+    <section class="card">
+      <h2>视频</h2>
+
+      <div class="field">
+        <label for="videoSpeed">倍速 <span id="videoSpeedValue" class="value-badge"></span></label>
+        <input type="range" id="videoSpeed" class="range"
+               data-storage-key="videoSpeed"
+               min="1" max="8" step="0.5">
+        <div class="range-scale"><span>1x</span><span>8x</span></div>
+      </div>
+
+      <div class="field switch-field">
+        <input type="checkbox" id="autoVideo" class="switch-input" data-storage-key="autoVideo" checked>
+        <label for="autoVideo" class="switch">
+          <span class="track"><span class="thumb"></span></span>
+          <span class="switch-label">视频挂机</span>
+        </label>
+      </div>
+
+      <div class="field switch-field">
+        <input type="checkbox" id="autoAnswer" class="switch-input" data-storage-key="autoAnswer" checked>
+        <label for="autoAnswer" class="switch">
+          <span class="track"><span class="thumb"></span></span>
+          <span class="switch-label">自动答题</span>
+        </label>
+      </div>
+
+      <div class="field switch-field">
+        <input type="checkbox" id="autoSubmit" class="switch-input" data-storage-key="autoSubmit" checked>
+        <label for="autoSubmit" class="switch">
+          <span class="track"><span class="thumb"></span></span>
+          <span class="switch-label">自动提交</span>
+        </label>
+      </div>
+    </section>
+
+    <!-- 区块：学习通专属 -->
+    <section class="card">
+      <h2>学习通专属</h2>
+
+      <fieldset class="field">
+        <legend>视频模式</legend>
+        <div class="radio-row">
+          <label for="cxVideoModeReport" class="radio">
+            <input type="radio" name="cxVideoMode" id="cxVideoModeReport"
+                   data-storage-key="cxVideoMode" value="report" checked>
+            <span>模拟上报</span>
+          </label>
+          <label for="cxVideoModePlay" class="radio">
+            <input type="radio" name="cxVideoMode" id="cxVideoModePlay"
+                   data-storage-key="cxVideoMode" value="play">
+            <span>正常播放</span>
+          </label>
+        </div>
+      </fieldset>
+
+      <div class="field">
+        <label for="cxReportBaseInterval">上报基础间隔</label>
+        <div class="input-row">
+          <input type="number" id="cxReportBaseInterval" class="text-input num"
+                 data-storage-key="cxReportBaseInterval"
+                 min="1" step="1" placeholder="58">
+          <span class="suffix-label">秒</span>
+        </div>
+      </div>
+
+      <div class="field switch-field">
+        <input type="checkbox" id="showProgress" class="switch-input" data-storage-key="showProgress" checked>
+        <label for="showProgress" class="switch">
+          <span class="track"><span class="thumb"></span></span>
+          <span class="switch-label">显示进度条</span>
+        </label>
+      </div>
+    </section>
+
+    <!-- 保存 -->
+    <section class="actions">
+      <button type="button" id="saveBtn" class="primary-btn">保存设置</button>
+      <p id="statusText" class="status" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>
