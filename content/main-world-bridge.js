@@ -62,7 +62,8 @@
     xhr: null,
     fetch: null,
     messageInstalled: false,
-    customEventSeen: typeof WeakSet === 'function' ? new WeakSet() : null
+    customEventSeen: typeof WeakSet === 'function' ? new WeakSet() : null,
+    unrecognizedQuestionDataWarned: false
   };
 
   try {
@@ -371,8 +372,21 @@
 
   function reportQuestionData(value, requestUrl) {
     var data = parseResponseValue(value);
-    if (!data || data.code !== 0 || typeof data.content !== 'string' ||
-        data.content.indexOf('unipus.') !== 0 || typeof data.k !== 'string') {
+    if (!data || data.code !== 0 || typeof data.content !== 'string') {
+      return;
+    }
+    if (data.content.indexOf('unipus.') !== 0 || typeof data.k !== 'string') {
+      // 诊断：URL 疑似题目数据请求但响应格式未识别（可能为新格式/明文）。
+      // 只打印一次，避免刷屏（供主控核对真实页面后补充识别规则）。
+      var urlText = resolveUrl(requestUrl || '');
+      var looksLikeQuestionUrl = /\/course\/api\/v3\/content\//.test(urlText) ||
+        /newExploration/.test(urlText);
+      if (looksLikeQuestionUrl && !state.unrecognizedQuestionDataWarned) {
+        state.unrecognizedQuestionDataWarned = true;
+        console.log('[course-helper] MAIN bridge：题目响应格式未识别（content 前缀=' +
+          String(data.content).slice(0, 40) + '，k=' +
+          (data.k === undefined ? '缺失' : typeof data.k) + '，url=' + urlText + '）');
+      }
       return;
     }
 
