@@ -264,6 +264,19 @@
     return 60 + Math.floor(randomValue * 61);
   }
 
+  var submitWarnedKeys = {};
+  function warnSubmitOnce(key, message) {
+    if (submitWarnedKeys[key]) {
+      return;
+    }
+    submitWarnedKeys[key] = true;
+    try {
+      console.log('[course-helper] MAIN bridge 提交改写跳过：' + message);
+    } catch (ignoredLogError) {
+      // 诊断日志失败不影响流程。
+    }
+  }
+
   /*
    * 仅对明确授权的 UCampus 提交 JSON 做改写。所有校验在改变原队列以前完成，
    * 因此无队列、答案树非法或队列不足时会返回 null，调用者原样放行请求。
@@ -275,6 +288,7 @@
 
     var queue = getAnswerQueue();
     if (!queue || queue.length === 0) {
+      warnSubmitOnce('empty-queue', '答案队列为空或不可用（submit 前未下发答案）。');
       return null;
     }
 
@@ -286,6 +300,7 @@
     }
 
     if (!isObject(submitPayload) || !Array.isArray(submitPayload.quesDatas)) {
+      warnSubmitOnce('bad-structure', '提交结构不符（缺 quesDatas 数组）。');
       return null;
     }
 
@@ -296,6 +311,7 @@
       for (var questionIndex = 0; questionIndex < submitPayload.quesDatas.length; questionIndex += 1) {
         var question = submitPayload.quesDatas[questionIndex];
         if (!isObject(question) || typeof question.answer !== 'string') {
+          warnSubmitOnce('bad-question', '提交题目结构不符（第 ' + questionIndex + ' 题缺 answer 字符串）。');
           return null;
         }
 
@@ -303,6 +319,7 @@
         try {
           answerTree = JSON.parse(question.answer);
         } catch (invalidAnswerTreeError) {
+          warnSubmitOnce('bad-answer-json', '第 ' + questionIndex + ' 题答案树 JSON 解析失败。');
           return null;
         }
 
@@ -317,6 +334,9 @@
         for (var leafIndex = 0; leafIndex < leaves.length; leafIndex += 1) {
           var queueIndex = pendingAnswers.length;
           if (queueIndex >= queue.length || typeof queue[queueIndex] !== 'string') {
+            warnSubmitOnce('queue-short',
+              '答案队列不足：第 ' + questionIndex + ' 题需要 ' + (queueIndex + 1) +
+              ' 个答案位，队列只有 ' + queue.length + ' 个（语音题等占位与提交叶子数不匹配？）。');
             return null;
           }
           pendingAnswers.push(queue[queueIndex]);
@@ -324,6 +344,7 @@
       }
 
       if (pendingAnswers.length === 0) {
+        warnSubmitOnce('no-leaves', '提交答案树无 value 叶子可注入。');
         return null;
       }
 
@@ -351,6 +372,7 @@
         answerCount: pendingAnswers.length
       };
     } catch (rewriteError) {
+      warnSubmitOnce('rewrite-exception', '改写过程异常：' + (rewriteError && rewriteError.message ? rewriteError.message : String(rewriteError)));
       return null;
     }
   }

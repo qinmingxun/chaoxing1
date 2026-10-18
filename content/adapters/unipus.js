@@ -904,6 +904,24 @@ function logUnknownReplyTypeOnce(replyType) {
   );
 }
 
+// 答案树叶子计数（与 main-world-bridge 的 collectValueLeaves 同规则）：
+// 数组递归元素；有 children 数组递归 children；否则有 value 属性计 1 个叶子。
+// 用于语音题占位：提交注入按 value 叶子先序 shift，语音题的叶子数决定占位数。
+function countAnswerTreeLeaves(node) {
+  if (Array.isArray(node)) {
+    let count = 0;
+    for (const item of node) count += countAnswerTreeLeaves(item);
+    return count;
+  }
+  if (!node || typeof node !== "object") return 0;
+  if (Array.isArray(node.children)) {
+    let count = 0;
+    for (const child of node.children) count += countAnswerTreeLeaves(child);
+    return count;
+  }
+  return Object.prototype.hasOwnProperty.call(node, "value") ? 1 : 0;
+}
+
 function parseUnipusQuestionJson(plainText) {
   const pick = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
   const questions = [];
@@ -1008,7 +1026,21 @@ function parseUnipusQuestionJson(plainText) {
           continue;
         }
       }
+      // 答案树叶子数：提交注入按叶子先序 shift，语音题占位数须与之一致。
+      // 一个 entry 恰好产出 1 题时叶子数归属该题（多题条目无法精确分配，回退占位 1）。
+      let answerLeaves = 0;
+      if (typeof entry.answer === "string" && entry.answer) {
+        try {
+          answerLeaves = countAnswerTreeLeaves(JSON.parse(entry.answer));
+        } catch (_error) {
+          answerLeaves = 0;
+        }
+      }
+      const countBefore = questions.length;
       collect(inner, "");
+      if (answerLeaves > 1 && questions.length === countBefore + 1) {
+        questions[questions.length - 1].__answerLeafCount = answerLeaves;
+      }
     }
   }
   return questions;
@@ -1885,7 +1917,13 @@ export async function runAutoAnswer(ctx) {
   for (let index = 0; index < questions.length; index += 1) {
     const question = questions[index];
     if (question && question.__isVoice === true) {
-      answers.push(""); // 语音题占位（不求解、不填答、不占 missing）
+      // 语音题占位：按答案树叶子数放空字符串（与提交注入的先序 shift 对齐；
+      // 叶子数无法解析时回退 1）。
+      const placeholderCount = Number(question.__answerLeafCount) > 0
+        ? Math.floor(Number(question.__answerLeafCount)) : 1;
+      for (let placeholder = 0; placeholder < placeholderCount; placeholder += 1) {
+        answers.push("");
+      }
       continue;
     }
     const solvablePosition = solvablePositionByIndex[index];
