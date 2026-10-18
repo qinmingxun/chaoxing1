@@ -1585,11 +1585,110 @@ export async function runAutoAnswer(ctx) {
 
   setAnswerQueue(answers);
   installSubmitInterceptor();
-  unipusLog(context, `u校园答案注入已就绪：${answers.length} 道题，等待用户提交时自动注入。`);
+  // 页面可见填答：把答案按顺序写入页面输入框（失败不阻塞，提交注入仍兜底）。
+  const pageFilled = fillAnswersToPage(getContextDocument(context), answers);
+  unipusLog(context,
+    `u校园答案注入已就绪：${answers.length} 道题，等待用户提交时自动注入。` +
+    (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` : "（页面输入框未命中，提交时仍会注入）"));
   return { started: true, answerCount: answers.length };
 }
 
 // ==== END SECTION: unipus-auto-answer ====
+
+// ==== SECTION: unipus-page-fill ====
+// ---- 页面可见填答（主控 2026-10-18 实测需求：答案直接显示在页面输入框）----
+// 题目容器选择器来自真实页面核对（用户提供）：
+//   #main-content ... .layout-reply-container .item（每题一个容器），
+//   填空/简答输入框为容器内 input/textarea（DOM 顺序 = 空位顺序，
+//   span:nth-child(N) > input）。
+// 填答用原生 value setter（沿原型链）+ input 事件，平台前端框架可识别；
+// 提交注入仍保留（双保险：页面填答失败不影响提交时改写 payload）。
+const UNIPUS_DOM_ITEM_SELECTOR_CANDIDATES = Object.freeze([
+  "#main-content .layout-reply-container .item",
+  ".layout-reply-container .item",
+]);
+
+function setUnipusInputValue(element, value) {
+  if (!element) return;
+  const text = value === null || value === undefined ? "" : String(value);
+  let descriptor = null;
+  let owner = element;
+  while (owner && !descriptor) {
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(owner, "value") || null;
+    } catch (_error) {
+      descriptor = null;
+    }
+    if (!descriptor) {
+      try {
+        owner = Object.getPrototypeOf(owner);
+      } catch (_error) {
+        owner = null;
+      }
+    }
+  }
+  try {
+    if (descriptor && typeof descriptor.set === "function") descriptor.set.call(element, text);
+    else element.value = text;
+  } catch (_error) {
+    try {
+      element.value = text;
+    } catch (_assignmentError) {
+      // 只读对象安全跳过。
+    }
+  }
+  try {
+    if (typeof element.dispatchEvent === "function") {
+      let event = null;
+      let EventConstructor = null;
+      try {
+        const view = element.ownerDocument && element.ownerDocument.defaultView;
+        EventConstructor = (view && typeof view.Event === "function" && view.Event) ||
+          (typeof Event === "function" ? Event : null);
+      } catch (_error) {
+        EventConstructor = typeof Event === "function" ? Event : null;
+      }
+      if (EventConstructor) {
+        event = new EventConstructor("input", { bubbles: true });
+      } else {
+        event = { type: "input", bubbles: true };
+      }
+      element.dispatchEvent(event);
+    }
+  } catch (_error) {
+    // input 事件派发失败不阻塞填答。
+  }
+}
+
+// 按 DOM 顺序把答案队列填入页面输入框；返回填充数。失败不抛出。
+function fillAnswersToPage(doc, answers) {
+  if (!doc || typeof doc.querySelectorAll !== "function") return 0;
+  if (!Array.isArray(answers) || !answers.length) return 0;
+  let itemNodes = [];
+  for (const selector of UNIPUS_DOM_ITEM_SELECTOR_CANDIDATES) {
+    itemNodes = safeQueryAll(doc, selector);
+    if (itemNodes.length) break;
+  }
+  if (!itemNodes.length) return 0;
+  const inputs = [];
+  for (const item of itemNodes) {
+    for (const input of safeQueryAll(item, "input, textarea")) inputs.push(input);
+  }
+  let filled = 0;
+  for (let index = 0; index < inputs.length && index < answers.length; index += 1) {
+    const answer = answers[index];
+    if (!answer) continue;
+    try {
+      setUnipusInputValue(inputs[index], answer);
+      filled += 1;
+    } catch (_error) {
+      // 单个输入框填答失败不影响其余。
+    }
+  }
+  return filled;
+}
+
+// ==== END SECTION: unipus-page-fill ====
 
 // ==== SECTION: unipus-keep-alive ====
 // ---- 保活接线 ----
