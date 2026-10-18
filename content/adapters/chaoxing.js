@@ -23,6 +23,7 @@ const ROUTES = Object.freeze({
 });
 
 const ROUTE_PATHS = Object.freeze(Object.values(ROUTES));
+const FIXTURE_PATH = "/test-page.html";
 const MARG_TRY_RE = /try\s*\{\s*mArg\s*=\s*([\s\S]*?)(?:;\s*)?\}\s*catch\b/gi;
 const MARG_ASSIGN_RE = /mArg\s*=\s*([\{\[][\s\S]*?)(?:;|$)/i;
 const MAIN_SOURCE = "course-helper";
@@ -156,6 +157,75 @@ export async function init(ctx) {
   if (path === ROUTES.KNOWLEDGE_CARDS) {
     const parsed = parseTasks(doc);
     await processTaskQueue(parsed.tasks, parsed.defaults, activeContext, generation);
+  } else if (path === FIXTURE_PATH) {
+    // 本地 fixture 测试页（spec/70，localhost 经 loader 放行进入本分支）：
+    // 1) PC 测验区：solvePcQuiz 自动提取→答题→提交→确认；
+    // 2) 视频区：以伪任务走 runVideoPlayTask（自动 play/倍速，ended 时完成；不 await，
+    //    随页面上"模拟 ended"按钮触发完成）；"下一集"按钮由 fixture 页面自身逻辑处理；
+    // 3) 挂机弹窗区：由 loader 的全局 keep-alive 覆盖（本分支无需处理）；
+    // 4) u校园提交注入区：MAIN bridge 已由 loader 注入，用户点"模拟提交"时自动改写
+    //    payload（答案队列可经页面控制台预填 __UCAMPUS_ANSWER_CACHE__）。
+    if (activeContext && typeof activeContext.log === "function") {
+      activeContext.log("[course-helper] 本地 fixture 测试页：验证 PC 测验与视频播放。");
+    }
+    try {
+      await solvePcQuiz(doc, activeContext);
+    } catch (_error) {
+      // fixture 测验异常不阻塞视频验证。
+    }
+    try {
+      // fixture 视频无真实 src：浏览器原生 play() 必然 reject，且 paused 恒为 true，
+      // 会令视频分区每轮轮询重试恢复（pause/play 抖动循环）。此处仅对本页面的
+      // video 包装 play() 模拟可播放状态，让视频验证区按"自动播放→倍速→ended 完成"
+      // 正常流转（仅 fixture 分支生效，不影响生产页面）。
+      for (const media of safeQueryAll(doc, "video")) {
+        if (media.__courseHelperFixtureMedia) continue;
+        try {
+          Object.defineProperty(media, "__courseHelperFixtureMedia", {
+            configurable: true,
+            value: true,
+          });
+          media.play = function fixturePlay() {
+            try {
+              this.paused = false;
+            } catch (_error) {
+              // 只读媒体对象安全跳过。
+            }
+            return Promise.resolve();
+          };
+        } catch (_error) {
+          // 包装失败时保留原生行为（抖动循环仅影响 fixture 日志）。
+        }
+      }
+      void runVideoPlayTask({ type: "video", iframe: { contentDocument: doc } }, {}, activeContext);
+    } catch (_error) {
+      // 视频验证失败不抛出。
+    }
+    // fixture 诊断：延迟打印 keep-alive 运行状态（loader 在 init 完成后启动保活），
+    // 供本地验证挂机弹窗自动点击时排查（真实平台页面不进入本分支，无影响）。
+    try {
+      const fixtureDiagnoseAt = Date.now();
+      setTimeout(() => {
+        try {
+          const keepAliveApi = typeof globalThis !== "undefined"
+            ? globalThis.__COURSE_HELPER_KEEP_ALIVE__
+            : null;
+          const state = keepAliveApi && typeof keepAliveApi.getState === "function"
+            ? keepAliveApi.getState()
+            : null;
+          const message = `[course-helper] fixture: keep-alive 状态（+${Date.now() - fixtureDiagnoseAt}ms）= ${state ? JSON.stringify(state) : (keepAliveApi ? "无 getState" : "未挂载")}`;
+          if (activeContext && typeof activeContext.log === "function") {
+            activeContext.log(message);
+          } else {
+            console.log(message);
+          }
+        } catch (_error) {
+          // 诊断失败不影响验证流程。
+        }
+      }, 2500);
+    } catch (_error) {
+      // 诊断注册失败不抛出。
+    }
   } else if (path === ROUTES.WORK || path === ROUTES.EXAM || path.indexOf("/work/phone") === 0) {
     // 作业页 / 考试页 / 手机版测验（含任务列表页与测验 iframe）：
     // 由 solvePhoneWorkExam 按页面结构自动分流（quiz-phone/work-exam 分区）。

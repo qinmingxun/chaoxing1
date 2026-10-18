@@ -941,8 +941,9 @@
         target = environment.document;
       }
     }
-    if (!observerResult || !target || typeof target !== 'object' ||
-        typeof target.observe !== 'function') {
+    // target 只是观察目标（Document/Node），observe 方法属于观察器对象本身，
+    // 因此这里只要求 target 是可用对象（真实 Document 没有 observe 属性）。
+    if (!observerResult || !target || typeof target !== 'object') {
       return;
     }
 

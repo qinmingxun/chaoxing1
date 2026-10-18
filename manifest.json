@@ -21,6 +21,28 @@
     "*://*.zhihuishu.com/*",
     "*://*.unipus.cn/*"
   ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/md5.js",
+        "lib/typr.js",
+        "lib/table.json",
+        "content/quiz-solver.js",
+        "content/keep-alive.js",
+        "content/video-manager.js",
+        "content/adapters/chaoxing.js",
+        "content/adapters/zhihuishu.js",
+        "content/adapters/unipus.js"
+      ],
+      "matches": [
+        "*://*.chaoxing.com/*",
+        "*://*.zhihuishu.com/*",
+        "*://*.unipus.cn/*",
+        "*://localhost/*",
+        "*://127.0.0.1/*"
+      ]
+    }
+  ],
   "background": {
     "service_worker": "background/service-worker.js"
   },

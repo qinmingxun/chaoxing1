@@ -151,8 +151,18 @@
     return String(hostname || '').trim().toLowerCase().replace(/\.$/, '');
   }
 
+  function isLocalTestHost(hostname) {
+    const normalized = normalizeHostname(hostname);
+    return normalized === 'localhost' || normalized === '127.0.0.1';
+  }
+
   function resolveAdapterEntry(hostname) {
     const normalized = normalizeHostname(hostname);
+    // 本地 fixture 测试页（spec/70）：localhost/127.0.0.1 复用学习通适配器，
+    // fixture 页面主要模拟学习通 PC 测验 DOM 与视频/挂机/提交注入验证。
+    if (isLocalTestHost(normalized)) {
+      return ADAPTER_REGISTRY['chaoxing.com'];
+    }
     const registeredHosts = Object.keys(ADAPTER_REGISTRY);
     for (const registeredHost of registeredHosts) {
       if (normalized === registeredHost || normalized.endsWith(`.${registeredHost}`)) {
@@ -388,7 +398,12 @@
     const hostname = locationObject && locationObject.hostname;
     const pathname = locationObject && locationObject.pathname;
     const adapterEntry = resolveAdapterEntry(hostname);
-    const route = resolveRoute(pathname);
+    let route = resolveRoute(pathname);
+    // 本地 fixture 测试页（spec/70）：路径不匹配课程路由时用 FIXTURE 占位路由放行，
+    // 由适配器（chaoxing）在其 fixture 分支处理页面上的测验/视频/弹窗验证区。
+    if (!route && isLocalTestHost(hostname)) {
+      route = Object.freeze({ name: 'FIXTURE', path: '/test-page.html', test: /\/test-page\.html(?:\?|$)/i });
+    }
 
     state.settings = await readSettings();
     state.route = route;
@@ -407,6 +422,10 @@
     }
 
     await loadSharedModules();
+    // 保活系统尽早启动（不依赖适配器）：真实平台的任务队列（视频上报等）与
+    // fixture 测验都可能长时间占用 init，期间的挂机弹窗必须被观察处理。
+    startKeepAlive();
+
     const adapter = await loadAdapter(adapterEntry);
     if (!adapter) {
       state.initialized = true;
@@ -423,7 +442,8 @@
       }
     })();
 
-    if (typeof adapter.matches === 'function') {
+    // 本地 fixture 测试页由 loader 直接放行（chaoxing.matches 只按生产路由判定）。
+    if (!isLocalTestHost(hostname) && typeof adapter.matches === 'function') {
       let matched = false;
       try {
         matched = Boolean(adapter.matches(currentUrl || locationObject));
@@ -454,8 +474,6 @@
     } catch (error) {
       warnOnce(`adapter-init-failed:${adapterEntry.name}`, `${adapterEntry.name} adapter init 失败，继续保持页面可用。`, error);
     }
-
-    startKeepAlive();
 
     state.initialized = true;
     return state;

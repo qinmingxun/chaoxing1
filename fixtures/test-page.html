@@ -333,7 +333,7 @@ video {
       <div>
         <div>
           <p>确认提交本次测验？</p>
-          <a class="bluebtn" href="javascript:void(0)">确定</a>
+          <a class="bluebtn" href="#">确定</a>
         </div>
       </div>
     </div>
@@ -518,7 +518,8 @@ video {
     showNotice('答案已保存（模拟）');
   });
   /* 确认弹窗 bluebtn：隐藏弹窗，状态文本变“已完成” */
-  document.querySelector('#confirmSubWin > div > div > a.bluebtn').addEventListener('click', function () {
+  document.querySelector('#confirmSubWin > div > div > a.bluebtn').addEventListener('click', function (ev) {
+    if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
     confirmWin.style.display = 'none';
     titStatus.textContent = '已完成';
     log('bluebtn 确认点击：弹窗已隐藏，状态文本 .testTit_status 已更新为“已完成”');
