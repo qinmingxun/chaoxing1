@@ -371,8 +371,10 @@ function handleQuestionDataPayload(payload) {
     encrypted: payload.encrypted === true,
     url: asString(payload.url),
   });
-  // 主控接线：拦截到题目数据后触发一次自动答题（幂等/节流/成功锁定）。
-  void triggerAutoAnswerOnce();
+  // 主控接线：新题到达即调度一轮自动答题（防抖合并同一页连续拦截的多题；
+  // SPA 切下一页后无需刷新页面——提交成功时会清空缓存并重置状态，见
+  // handleSubmitPayload 的清理分支）。
+  scheduleAutoAnswerForNewQuestions();
 }
 
 // 密文日志（spec/40 降级顺序第 2 条：console.log 密文+密钥，README 让用户提供
@@ -1354,10 +1356,35 @@ const QUIZ_SOLVER_GLOBAL_KEY = "CourseHelperQuizSolver";
 const QUIZ_SOLVER_MODULE_PATH = "../quiz-solver.js";
 const STORAGE_AUTO_ANSWER_KEY = "autoAnswer";
 
-// ---- 主控接线：自动答题触发（init 立即触发 + 题目数据事件驱动重试）----
-// 成功（started:true）后锁定不再触发；事件连发时 2 秒节流；destroy 时重置。
+// ---- 主控接线：自动答题触发（init 立即触发 + 新题到达防抖重试）----
+// 一轮成功（started:true）后锁定；新题到达（scheduleAutoAnswerForNewQuestions）解锁
+// 并防抖合并同一页多题；事件连发时 2 秒节流；destroy/提交成功后 resetAutoAnswerState。
 const AUTO_ANSWER_RETRY_THROTTLE_MS = 2000;
-const autoAnswerState = { started: false, running: null, lastAttemptAt: 0 };
+const AUTO_ANSWER_DEBOUNCE_MS = 1500;
+const autoAnswerState = {
+  started: false,
+  running: null,
+  lastAttemptAt: 0,
+  retryTimer: null,
+  rerunAfterRunning: false,
+};
+
+// 新题到达调度（handleQuestionDataPayload 调用）：解锁上一轮锁定，防抖 1.5 秒
+// 触发新一轮答题（同一页多题连续拦截合并为一次求解）；求解运行期间到达的
+// 新题在结束后补跑一轮（防漏，见 triggerAutoAnswerOnce 的 finally 分支）。
+function scheduleAutoAnswerForNewQuestions() {
+  autoAnswerState.started = false;
+  autoAnswerState.lastAttemptAt = 0; // 新题到达不受上次尝试的节流窗口限制
+  if (autoAnswerState.running) {
+    autoAnswerState.rerunAfterRunning = true;
+    return;
+  }
+  if (autoAnswerState.retryTimer) return; // 已有待触发的防抖调度
+  autoAnswerState.retryTimer = setTimeout(() => {
+    autoAnswerState.retryTimer = null;
+    void triggerAutoAnswerOnce();
+  }, AUTO_ANSWER_DEBOUNCE_MS);
+}
 
 function triggerAutoAnswerOnce() {
   if (autoAnswerState.started || autoAnswerState.running) return autoAnswerState.running;
@@ -1372,6 +1399,13 @@ function triggerAutoAnswerOnce() {
       // runAutoAnswer 内部已防御，此处兜底防未捕获异常。
     } finally {
       autoAnswerState.running = null;
+      // 求解期间又有新题到达（跨页竞态）：解锁并立即补跑一轮。
+      if (autoAnswerState.rerunAfterRunning) {
+        autoAnswerState.rerunAfterRunning = false;
+        autoAnswerState.started = false;
+        autoAnswerState.lastAttemptAt = 0;
+        void triggerAutoAnswerOnce();
+      }
     }
   })();
   return autoAnswerState.running;
@@ -1381,6 +1415,11 @@ function resetAutoAnswerState() {
   autoAnswerState.started = false;
   autoAnswerState.running = null;
   autoAnswerState.lastAttemptAt = 0;
+  autoAnswerState.rerunAfterRunning = false;
+  if (autoAnswerState.retryTimer) {
+    clearTimeout(autoAnswerState.retryTimer);
+    autoAnswerState.retryTimer = null;
+  }
 }
 
 let submitMessageListener = null; // submit 事件 "message" 监听函数
@@ -1439,6 +1478,16 @@ function handleSubmitPayload(payload) {
   }
   const usedTimeText = Number.isNaN(usedTime) ? "未知" : `${usedTime} 秒`;
   unipusLog(activeContext, `u校园提交已注入：answerCount=${answerCount}，usedTime=${usedTimeText}`);
+  // 主控接线：本轮提交已消费答案队列。清空拦截缓存并重置自动答题/自动提交状态，
+  // SPA 切下一页后新题到达（handleQuestionDataPayload → scheduleAutoAnswerForNewQuestions）
+  // 会自动重新求解填答，无需刷新页面。缓存必须在此时清空，否则旧题与新题混排
+  // 会导致答案队列位置错位。
+  interceptedQuestions.length = 0;
+  interceptedContentSeen = null;
+  stopPageFillObserver();
+  resetAutoAnswerState();
+  resetAutoSubmitState();
+  unipusLog(activeContext, "u校园本轮提交完成，等待下一页题目到达后自动继续。");
 }
 
 // ---- chrome.storage.local.autoAnswer 防御式读取 ----
@@ -1598,6 +1647,9 @@ export async function runAutoAnswer(ctx) {
   unipusLog(context,
     `u校园答案注入已就绪：${answers.length} 道题，等待用户提交时自动注入。` +
     (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` : "（页面输入框暂未出现，已持续监听待其渲染后填入；提交时仍会注入）"));
+  // 自动提交：页面填答成功即调度点击提交按钮（autoSubmit 开关在调度函数内判定）；
+  // 输入框延迟渲染的场景由页面填答观察者填答成功后补调度。
+  if (pageFilled > 0) scheduleAutoSubmit(context);
   return { started: true, answerCount: answers.length };
 }
 
@@ -1754,6 +1806,8 @@ function installPageFillObserver(context, answers) {
       if (fillAnswersToPage(doc, answers) > 0) {
         unipusLog(context, `u校园页面填答（观察者）：答案已填入输入框。`);
         stopPageFillObserver();
+        // 延迟渲染的输入框填答完成后，同样调度自动提交（autoSubmit 开关内部判定）。
+        scheduleAutoSubmit(context);
       }
     });
     pageFillObserver.observe(doc, { childList: true, subtree: true });
@@ -1769,6 +1823,99 @@ function installPageFillObserver(context, answers) {
 }
 
 // ==== END SECTION: unipus-page-fill ====
+
+// ==== SECTION: unipus-auto-submit ====
+// ---- 自动提交（主控 2026-10-18 实测需求：答案填入后自动提交并随平台切下一页）----
+// 触发点：runAutoAnswer 页面填答成功 / 页面填答观察者延迟填答成功。
+// 每轮只调度一次（autoSubmitState.fired 锁定），提交成功事件（handleSubmitPayload）
+// 会 resetAutoSubmitState；autoSubmit 开关由 ctx.settings.autoSubmit 控制（默认 true）。
+// 提交按钮查找：优先 .layout-reply-container 内 button，其次全页 button/role=button/
+// class 含 submit/confirm 的元素；文本须含"提交"且不含"反馈/评论/意见"等干扰词，
+// 且元素必须可见、未禁用。找不到按钮时仅警告一次（用户可提供 selector 补充）。
+
+const AUTO_SUBMIT_CLICK_DELAY_MS = 3000; // 填答完成后等 3 秒（框架状态同步）再点击
+const autoSubmitState = { timer: null, fired: false };
+
+function resetAutoSubmitState() {
+  if (autoSubmitState.timer) {
+    clearTimeout(autoSubmitState.timer);
+    autoSubmitState.timer = null;
+  }
+  autoSubmitState.fired = false;
+}
+
+function scheduleAutoSubmit(context) {
+  if (autoSubmitState.fired || autoSubmitState.timer) return; // 每轮只调度一次
+  if (context && context.settings && context.settings.autoSubmit === false) {
+    unipusLog(context, "u校园自动提交已关闭（settings.autoSubmit=false），等待用户手动提交。");
+    return;
+  }
+  autoSubmitState.fired = true;
+  autoSubmitState.timer = setTimeout(() => {
+    autoSubmitState.timer = null;
+    clickSubmitButton(context);
+  }, AUTO_SUBMIT_CLICK_DELAY_MS);
+}
+
+function isElementVisible(element) {
+  if (!element) return false;
+  try {
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function findSubmitButton(doc) {
+  if (!doc || typeof doc.querySelectorAll !== "function") return null;
+  const candidates = [];
+  // 优先作答区内按钮；其次全页候选（button / role=button / class 含 submit|confirm）。
+  for (const container of safeQueryAll(doc, ".layout-reply-container")) {
+    for (const button of safeQueryAll(container, "button")) candidates.push(button);
+  }
+  for (const selector of ['button', '[role="button"]', '[class*="submit" i]', '[class*="confirm" i]']) {
+    for (const element of safeQueryAll(doc, selector)) candidates.push(element);
+  }
+  const seen = new Set();
+  for (const element of candidates) {
+    if (seen.has(element)) continue;
+    seen.add(element);
+    if (!isElementVisible(element)) continue;
+    if (element.disabled === true || element.getAttribute("aria-disabled") === "true") continue;
+    const text = asString(element.textContent).trim();
+    if (!text) continue;
+    if (/提交/.test(text) && !/提交(?:反馈|评论|意见|问题)/.test(text)) return element;
+  }
+  return null;
+}
+
+function clickSubmitButton(context) {
+  const doc = getContextDocument(context);
+  const button = findSubmitButton(doc);
+  if (!button) {
+    unipusWarn(context,
+      "u校园自动提交：未找到提交按钮（若页面确有提交按钮，请提供其 selector 以便补充查找规则）。");
+    return false;
+  }
+  try {
+    button.click();
+  } catch (_error) {
+    try {
+      const view = (doc && doc.defaultView) || getGlobalRoot();
+      const EventConstructor = view && view.Event ? view.Event : (typeof Event !== "undefined" ? Event : null);
+      if (EventConstructor && typeof button.dispatchEvent === "function") {
+        button.dispatchEvent(new EventConstructor("click", { bubbles: true }));
+      }
+    } catch (_dispatchError) {
+      // 点击派发失败不抛出。
+    }
+  }
+  unipusLog(context, "u校园自动提交：已点击提交按钮，等待平台提交并切下一页。");
+  return true;
+}
+
+// ==== END SECTION: unipus-auto-submit ====
 
 // ==== SECTION: unipus-keep-alive ====
 // ---- 保活接线 ----
@@ -1909,6 +2056,9 @@ export function destroy() {
 
   // 停止页面填答观察者（输入框监听）
   stopPageFillObserver();
+
+  // 停止自动提交调度（未触发的定时器清理）
+  resetAutoSubmitState();
 
   // 移除 window "message" 监听
   removeQuestionMessageListener();
