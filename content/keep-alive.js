@@ -20,6 +20,14 @@
     '继续': true,
     ok: true
   };
+  // antd 确认弹窗（.ant-modal）的"我知道了"按钮：弹窗出现时间不固定、内容
+  // 不含挂机关键词（如平台提示/成绩弹窗），由弹窗结构特征触发点击。
+  // 仅匹配"我知道了"系标签，避免误点其他 antd 弹窗的"确定"类危险按钮。
+  var ANT_MODAL_BUTTON_LABELS = {
+    '我知道了': true,
+    '知道了': true,
+    '我知道': true
+  };
   var hasOwn = Object.prototype.hasOwnProperty;
 
   function getDefaultRoot() {
@@ -895,6 +903,81 @@
     }, environment.runtime.popupDelay);
   }
 
+  // antd 弹窗"我知道了"按钮查找：节点自身是按钮（label 匹配）直接采用；
+  // 否则在节点内查 .ant-modal-confirm-btns / .ant-modal-footer 下的按钮。
+  function findAntdModalConfirmButton(scope) {
+    if (!scope) {
+      return null;
+    }
+    if (isButtonCandidate(scope) && ANT_MODAL_BUTTON_LABELS[getButtonLabel(scope)]) {
+      return scope;
+    }
+    var buttons = [];
+    addQueryResults(scope, '.ant-modal-confirm-btns button', buttons);
+    addQueryResults(scope, '.ant-modal-footer button', buttons);
+    for (var index = 0; index < buttons.length; index += 1) {
+      if (ANT_MODAL_BUTTON_LABELS[getButtonLabel(buttons[index])]) {
+        return buttons[index];
+      }
+    }
+    return null;
+  }
+
+  // 判断新增节点是否为 antd 弹窗（结构特征：ant-modal 相关 class 或含确认按钮容器）。
+  function isAntdModalNode(node) {
+    if (!isObjectLike(node)) {
+      return false;
+    }
+    var classList = readProperty(node, 'classList');
+    var contains = classList && typeof classList.contains === 'function'
+      ? classList.contains.bind(classList)
+      : null;
+    try {
+      if (contains &&
+          (contains('ant-modal-wrap') || contains('ant-modal-content') ||
+           contains('ant-modal-confirm-btns') || contains('ant-modal'))) {
+        return true;
+      }
+    } catch (ignoredClassError) {
+      // 继续尝试 querySelector 探测。
+    }
+    if (node && typeof node.querySelector === 'function') {
+      try {
+        if (node.querySelector('.ant-modal-confirm-btns, .ant-modal-content')) {
+          return true;
+        }
+      } catch (ignoredQueryError) {
+        // 探测失败按非弹窗处理。
+      }
+    }
+    return false;
+  }
+
+  function scheduleAntdModalClick(state, environment, node) {
+    if (!node || !environment.runtime || !environment.runtime.popupEnabled) {
+      return;
+    }
+    if (collectionHas(state.scheduledNodes, node)) {
+      return;
+    }
+    collectionAdd(state.scheduledNodes, state.scheduledNodeArray, node);
+
+    addTimeout(state, environment, function clickAntdModalButton() {
+      if (!state.running || state.environment !== environment) {
+        return;
+      }
+      var button = findAntdModalConfirmButton(node);
+      if (!button || typeof button.click !== 'function') {
+        return;
+      }
+      try {
+        button.click();
+      } catch (ignoredClickError) {
+        // 弹窗按钮可能在延迟期间被页面销毁。
+      }
+    }, environment.runtime.popupDelay);
+  }
+
   function handleMutationRecords(state, environment, records) {
     if (!state.running || state.environment !== environment || !records) {
       return;
@@ -922,6 +1005,10 @@
         }
         if (POPUP_KEYWORDS.test(getNodeText(node))) {
           schedulePopupClick(state, environment, node);
+        } else if (isAntdModalNode(node)) {
+          // antd 弹窗（如 u校园"我知道了"提示）：出现时间不固定、内容不含
+          // 挂机关键词，按弹窗结构特征触发（只点"我知道了"系按钮）。
+          scheduleAntdModalClick(state, environment, node);
         }
       }
     }
