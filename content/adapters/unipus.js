@@ -1586,15 +1586,18 @@ export async function runAutoAnswer(ctx) {
   setAnswerQueue(answers);
   installSubmitInterceptor();
   // 页面可见填答：把答案按顺序写入页面输入框（失败不阻塞，提交注入仍兜底）。
-  // 输入框可能在视频播放后才渲染：未命中时延迟重试两次。
+  // 输入框可能在视频播放后才渲染：先立即尝试，未命中则安装观察者持续监听。
   let pageFilled = fillAnswersToPage(getContextDocument(context), answers);
   for (let retry = 0; retry < 2 && pageFilled === 0; retry += 1) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     pageFilled = fillAnswersToPage(getContextDocument(context), answers);
   }
+  if (pageFilled === 0) {
+    installPageFillObserver(context, answers);
+  }
   unipusLog(context,
     `u校园答案注入已就绪：${answers.length} 道题，等待用户提交时自动注入。` +
-    (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` : "（页面输入框未命中，提交时仍会注入）"));
+    (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` : "（页面输入框暂未出现，已持续监听待其渲染后填入；提交时仍会注入）"));
   return { started: true, answerCount: answers.length };
 }
 
@@ -1701,6 +1704,54 @@ function fillAnswersToPage(doc, answers) {
     }
   }
   return filled;
+}
+
+// 页面填答观察者：输入框可能随视频播放/异步渲染延迟出现，持续监听页面
+// DOM 变化，输入框组（数量与答案数一致）出现即填入；填满后断开。
+const PAGE_FILL_OBSERVER_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟兜底断开
+let pageFillObserver = null;
+let pageFillObserverTimer = null;
+
+function stopPageFillObserver() {
+  if (pageFillObserver) {
+    try {
+      pageFillObserver.disconnect();
+    } catch (_error) {
+      // 已断开的观察者安全跳过。
+    }
+    pageFillObserver = null;
+  }
+  if (pageFillObserverTimer) {
+    clearTimeout(pageFillObserverTimer);
+    pageFillObserverTimer = null;
+  }
+}
+
+function installPageFillObserver(context, answers) {
+  stopPageFillObserver();
+  const doc = getContextDocument(context);
+  if (!doc || typeof doc.querySelectorAll !== "function") return;
+  const MutationObserverCtor =
+    (doc.defaultView && doc.defaultView.MutationObserver) ||
+    (typeof MutationObserver !== "undefined" ? MutationObserver : null);
+  if (!MutationObserverCtor) return;
+  try {
+    pageFillObserver = new MutationObserverCtor(() => {
+      if (fillAnswersToPage(doc, answers) > 0) {
+        unipusLog(context, `u校园页面填答（观察者）：答案已填入输入框。`);
+        stopPageFillObserver();
+      }
+    });
+    pageFillObserver.observe(doc, { childList: true, subtree: true });
+    pageFillObserverTimer = setTimeout(() => {
+      if (pageFillObserver) {
+        unipusWarn(context, "u校园页面填答观察者超时（10 分钟），输入框未出现，已停止监听。");
+      }
+      stopPageFillObserver();
+    }, PAGE_FILL_OBSERVER_TIMEOUT_MS);
+  } catch (_error) {
+    stopPageFillObserver();
+  }
 }
 
 // ==== END SECTION: unipus-page-fill ====
@@ -1841,6 +1892,9 @@ export function destroy() {
   if (!activeContext) return; // 幂等
   const context = activeContext;
   activeGeneration += 1;
+
+  // 停止页面填答观察者（输入框监听）
+  stopPageFillObserver();
 
   // 移除 window "message" 监听
   removeQuestionMessageListener();
