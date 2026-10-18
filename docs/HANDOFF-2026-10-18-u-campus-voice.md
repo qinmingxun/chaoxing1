@@ -33,6 +33,13 @@ E:\刷课「刷课助手」MV3 浏览器扩展（GitHub: qinmingxun/chaoxing1，
 1. **语音题"录音停止"卡点**：录音开始后停止点击无效（React 重渲染替换节点）。已加 MediaRecorder.stop 观测 + "停止"文本扫描兜底（提交 dc78acb）。等用户重测，看日志：`MediaRecorder.stop 被调用` 是否出现、`尝试点击停止按钮` 是否命中；并请用户描述录音开始后的 UI（停止按钮位置/形态）。
 2. 若平台对录音内容有校验（要求识别出文字），下一步把在线 TTS 音频注入合成流。
 
+## 会话管理基建（2026-10-18 完成）
+
+- 全局 handoff skill 已安装（C:\Users\Lenovo\.claude\skills\handoff\，含 scripts/session-state.sh）
+- 全局 settings.json 已配 SessionStart hook（新会话自动打印项目状态与交接文档位置）
+- 用户偏好：习惯 VSCode 扩展会话；说"交接"后助手完成文档+注册+推送，用户在 VSCode 点新建会话即可（不要开终端窗口）
+- 项目记忆：C:\Users\Lenovo\.claude\projects\C--Users-Lenovo\memory\（u-campus-shuake-project.md 等）
+
 ## Known Issues / Open Questions
 
 - MediaRecorder 流来源显示"其他音频流"——可能是平台 clone 了合成流（无害），也可能是 iframe 路径（已开 all_frames，待重测确认）
