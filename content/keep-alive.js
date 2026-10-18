@@ -28,6 +28,11 @@
     '知道了': true,
     '我知道': true
   };
+  // 弹窗轮询间隔：MutationObserver 只能捕获新增节点；部分弹窗预先渲染在
+  // DOM 中、以 CSS 切换显示（addedNodes 不触发），用短轮询兜底。
+  var ANT_MODAL_POLL_MS = 2000;
+  // 同一按钮重复点击的最小间隔（弹窗关闭再打开时允许再点，防同一显示期重复点）。
+  var ANT_MODAL_RECLICK_MS = 10000;
   var hasOwn = Object.prototype.hasOwnProperty;
 
   function getDefaultRoot() {
@@ -978,6 +983,72 @@
     }, environment.runtime.popupDelay);
   }
 
+  // 元素可见性（getBoundingClientRect 宽高均大于 0；hidden 弹窗节点跳过）。
+  function isAntdModalVisible(node) {
+    if (!isObjectLike(node)) {
+      return false;
+    }
+    var rect = readProperty(node, 'getBoundingClientRect');
+    if (typeof rect !== 'function') {
+      return true; // 无法探测时按可见处理（点击路径自身有防御）
+    }
+    try {
+      var box = rect.call(node);
+      return isFiniteNumber(readProperty(box, 'width')) &&
+        readProperty(box, 'width') > 0 &&
+        isFiniteNumber(readProperty(box, 'height')) &&
+        readProperty(box, 'height') > 0;
+    } catch (ignoredRectError) {
+      return true;
+    }
+  }
+
+  // 轮询扫描可见的 antd 弹窗并点击"我知道了"系按钮（CSS 切换显示的非新增
+  // 弹窗兜底；MutationObserver 路径已在 handleMutationRecords 覆盖新增场景）。
+  function pollVisibleAntdModals(state, environment) {
+    var target = readProperty(environment.options, 'observeTarget');
+    if (!target) {
+      if (isNodeLike(environment.root)) {
+        target = environment.root;
+      } else {
+        target = environment.document;
+      }
+    }
+    if (!target || typeof target.querySelectorAll !== 'function') {
+      return;
+    }
+    var modals;
+    try {
+      modals = target.querySelectorAll('.ant-modal-wrap, .ant-modal');
+    } catch (ignoredQueryError) {
+      return;
+    }
+    if (!modals) {
+      return;
+    }
+    var now = Date.now();
+    for (var index = 0; index < modals.length; index += 1) {
+      var modal = modals[index];
+      if (!isAntdModalVisible(modal)) {
+        continue;
+      }
+      var button = findAntdModalConfirmButton(modal);
+      if (!button || typeof button.click !== 'function') {
+        continue;
+      }
+      var lastClickedAt = state.antdModalClickedAt.get(button) || 0;
+      if (now - lastClickedAt < ANT_MODAL_RECLICK_MS) {
+        continue; // 同一显示期已点过，不重复点
+      }
+      state.antdModalClickedAt.set(button, now);
+      try {
+        button.click();
+      } catch (ignoredClickError) {
+        // 弹窗按钮可能在点击前被页面销毁。
+      }
+    }
+  }
+
   function handleMutationRecords(state, environment, records) {
     if (!state.running || state.environment !== environment || !records) {
       return;
@@ -1116,6 +1187,15 @@
         }
       }, runtime.webSocketInterval);
     }
+
+    // 弹窗轮询：CSS 切换显示的非新增 antd 弹窗兜底（MutationObserver 只捕获新增）。
+    if (runtime.popupEnabled) {
+      addInterval(state, environment, function antdModalPollCallback() {
+        if (state.running && state.environment === environment) {
+          pollVisibleAntdModals(state, environment);
+        }
+      }, ANT_MODAL_POLL_MS);
+    }
   }
 
   var state = {
@@ -1126,7 +1206,8 @@
     timeouts: [],
     observer: null,
     scheduledNodes: makeWeakSet(),
-    scheduledNodeArray: []
+    scheduledNodeArray: [],
+    antdModalClickedAt: new WeakMap()
   };
 
   function destroy() {
@@ -1149,6 +1230,7 @@
     state.runtime = null;
     state.scheduledNodes = makeWeakSet();
     state.scheduledNodeArray.length = 0;
+    state.antdModalClickedAt = new WeakMap();
     return api;
   }
 
@@ -1164,6 +1246,7 @@
     state.running = true;
     state.scheduledNodes = makeWeakSet();
     state.scheduledNodeArray.length = 0;
+    state.antdModalClickedAt = new WeakMap();
 
     try {
       installTimers(state, environment);
