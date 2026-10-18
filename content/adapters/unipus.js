@@ -1586,7 +1586,12 @@ export async function runAutoAnswer(ctx) {
   setAnswerQueue(answers);
   installSubmitInterceptor();
   // 页面可见填答：把答案按顺序写入页面输入框（失败不阻塞，提交注入仍兜底）。
-  const pageFilled = fillAnswersToPage(getContextDocument(context), answers);
+  // 输入框可能在视频播放后才渲染：未命中时延迟重试两次。
+  let pageFilled = fillAnswersToPage(getContextDocument(context), answers);
+  for (let retry = 0; retry < 2 && pageFilled === 0; retry += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    pageFilled = fillAnswersToPage(getContextDocument(context), answers);
+  }
   unipusLog(context,
     `u校园答案注入已就绪：${answers.length} 道题，等待用户提交时自动注入。` +
     (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` : "（页面输入框未命中，提交时仍会注入）"));
@@ -1606,6 +1611,8 @@ export async function runAutoAnswer(ctx) {
 const UNIPUS_DOM_ITEM_SELECTOR_CANDIDATES = Object.freeze([
   "#main-content .layout-reply-container .item",
   ".layout-reply-container .item",
+  ".reply-container .item",
+  ".item",
 ]);
 
 function setUnipusInputValue(element, value) {
@@ -1664,16 +1671,24 @@ function setUnipusInputValue(element, value) {
 function fillAnswersToPage(doc, answers) {
   if (!doc || typeof doc.querySelectorAll !== "function") return 0;
   if (!Array.isArray(answers) || !answers.length) return 0;
-  let itemNodes = [];
+  let inputs = [];
   for (const selector of UNIPUS_DOM_ITEM_SELECTOR_CANDIDATES) {
-    itemNodes = safeQueryAll(doc, selector);
-    if (itemNodes.length) break;
+    const itemNodes = safeQueryAll(doc, selector);
+    if (!itemNodes.length) continue;
+    const candidateInputs = [];
+    for (const item of itemNodes) {
+      for (const input of safeQueryAll(item, "input, textarea")) candidateInputs.push(input);
+    }
+    if (!candidateInputs.length) continue;
+    // 输入框总数与答案数一致才采用（防止宽泛候选误命中无关输入框）；
+    // 否则记住第一个非空候选兜底。
+    if (candidateInputs.length === answers.length) {
+      inputs = candidateInputs;
+      break;
+    }
+    if (!inputs.length) inputs = candidateInputs;
   }
-  if (!itemNodes.length) return 0;
-  const inputs = [];
-  for (const item of itemNodes) {
-    for (const input of safeQueryAll(item, "input, textarea")) inputs.push(input);
-  }
+  if (!inputs.length) return 0;
   let filled = 0;
   for (let index = 0; index < inputs.length && index < answers.length; index += 1) {
     const answer = answers[index];
