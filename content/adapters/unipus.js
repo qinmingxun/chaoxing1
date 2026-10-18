@@ -1367,6 +1367,10 @@ const autoAnswerState = {
   lastAttemptAt: 0,
   retryTimer: null,
   rerunAfterRunning: false,
+  // 轮次计数：提交成功（handleSubmitPayload 清空缓存）时 +1。在途求解完成后
+  // 若 generation 已变化，说明本轮题目已提交，旧题答案作废（不得下发队列，
+  // 否则旧答案会注入下一页新题造成位置错位）。
+  generation: 0,
 };
 
 // 新题到达调度（handleQuestionDataPayload 调用）：解锁上一轮锁定，防抖 1.5 秒
@@ -1484,9 +1488,15 @@ function handleSubmitPayload(payload) {
   // 会导致答案队列位置错位。
   interceptedQuestions.length = 0;
   interceptedContentSeen = null;
+  // 轮次推进：使在途求解（若有）的旧题结果作废（见 runAutoAnswer 的
+  // generation 守卫），防止旧答案队列在提交后被下发注入到下一页新题。
+  autoAnswerState.generation += 1;
   stopPageFillObserver();
   resetAutoAnswerState();
   resetAutoSubmitState();
+  // 自动翻页：提交成功后平台会切到中间页，页脚出现"继续学习"按钮，
+  // 轮询等待并点击进入下一题（点击后新题拦截 → 新一轮自动答题，闭环）。
+  scheduleAutoContinue(activeContext);
   unipusLog(activeContext, "u校园本轮提交完成，等待下一页题目到达后自动继续。");
 }
 
@@ -1564,6 +1574,8 @@ export async function runAutoAnswer(ctx) {
     unipusWarn(activeContext, "runAutoAnswer：缺少 AdapterContext，跳过。");
     return { started: false, reason: "no-context" };
   }
+  // 轮次快照：求解期间若发生提交成功（generation 递增），本轮旧题结果作废。
+  const generation = autoAnswerState.generation;
 
   // autoAnswer 开关：ctx.settings.autoAnswer（默认 true，CONTRACTS §3）；
   // chrome.storage.local.autoAnswer 防御式覆盖；任一为 false 时不执行。
@@ -1595,6 +1607,13 @@ export async function runAutoAnswer(ctx) {
   } catch (_error) {
     unipusWarn(context, "solveQuestions 调用失败，跳过答案注入接线。");
     return { started: false, reason: "solve-failed" };
+  }
+
+  // generation 守卫：求解期间若已发生提交成功（缓存已清空、进入下一轮），
+  // 本轮旧题结果作废——不下发队列、不填答、不自动提交，防止旧答案错位注入新题。
+  if (autoAnswerState.generation !== generation) {
+    unipusLog(context, "u校园求解期间已发生提交，本轮旧题结果作废，等待下一轮新题。");
+    return { started: false, reason: "stale-generation" };
   }
 
   // 答案队列顺序 = 题目顺序（spec/40：位置填充，不需要题号映射）。
@@ -1649,7 +1668,8 @@ export async function runAutoAnswer(ctx) {
     (pageFilled > 0 ? `（已同步填入页面输入框 ${pageFilled} 处）` : "（页面输入框暂未出现，已持续监听待其渲染后填入；提交时仍会注入）"));
   // 自动提交：页面填答成功即调度点击提交按钮（autoSubmit 开关在调度函数内判定）；
   // 输入框延迟渲染的场景由页面填答观察者填答成功后补调度。
-  if (pageFilled > 0) scheduleAutoSubmit(context);
+  // 填答重试等待期间若发生提交（generation 变化），不再调度自动提交。
+  if (pageFilled > 0 && autoAnswerState.generation === generation) scheduleAutoSubmit(context);
   return { started: true, answerCount: answers.length };
 }
 
@@ -1939,6 +1959,28 @@ function findSubmitButton(doc) {
   return { element: null, stats };
 }
 
+// 安全点击：优先原生 click()，失败回退派发 click 事件（bubbles）。
+function clickElementSafely(context, element) {
+  if (!element) return false;
+  try {
+    element.click();
+    return true;
+  } catch (_error) {
+    try {
+      const doc = getContextDocument(context);
+      const view = (doc && doc.defaultView) || getGlobalRoot();
+      const EventConstructor = view && view.Event ? view.Event : (typeof Event !== "undefined" ? Event : null);
+      if (EventConstructor && typeof element.dispatchEvent === "function") {
+        element.dispatchEvent(new EventConstructor("click", { bubbles: true }));
+        return true;
+      }
+    } catch (_dispatchError) {
+      // 点击派发失败不抛出。
+    }
+  }
+  return false;
+}
+
 function clickSubmitButton(context) {
   const doc = getContextDocument(context);
   const found = findSubmitButton(doc);
@@ -1952,22 +1994,77 @@ function clickSubmitButton(context) {
       "），请提供提交按钮 selector 以便补充查找规则。");
     return false;
   }
-  const button = found.element;
-  try {
-    button.click();
-  } catch (_error) {
-    try {
-      const view = (doc && doc.defaultView) || getGlobalRoot();
-      const EventConstructor = view && view.Event ? view.Event : (typeof Event !== "undefined" ? Event : null);
-      if (EventConstructor && typeof button.dispatchEvent === "function") {
-        button.dispatchEvent(new EventConstructor("click", { bubbles: true }));
-      }
-    } catch (_dispatchError) {
-      // 点击派发失败不抛出。
+  if (clickElementSafely(context, found.element)) {
+    unipusLog(context, "u校园自动提交：已点击提交按钮，等待平台提交并切下一页。");
+    return true;
+  }
+  unipusWarn(context, "u校园自动提交：提交按钮点击失败。");
+  return false;
+}
+
+// ---- 自动翻页（主控 2026-10-18 实测需求：提交成功后的中间页需点击页脚
+// #pc-foot > div > a（文本"继续学习"，可能同样为伪元素渲染）才进入下一题）----
+// 触发点：handleSubmitPayload（提交注入成功）→ scheduleAutoContinue；
+// 先等 1.5 秒（提交响应渲染），再 800ms 轮询等待按钮出现，出现即点击一次，
+// 60 秒超时停止（最后一题场景）。点击后平台切下一页 → 新题拦截 →
+// 新一轮自动答题（闭环，见 handleQuestionDataPayload → scheduleAutoAnswerForNewQuestions）。
+const AUTO_CONTINUE_FIRST_DELAY_MS = 1500;
+const AUTO_CONTINUE_POLL_MS = 800;
+const AUTO_CONTINUE_TIMEOUT_MS = 60 * 1000;
+const autoContinueState = { timer: null, deadline: 0, clicked: false };
+
+function resetAutoContinueState() {
+  if (autoContinueState.timer) {
+    clearTimeout(autoContinueState.timer);
+    autoContinueState.timer = null;
+  }
+  autoContinueState.deadline = 0;
+  autoContinueState.clicked = false;
+}
+
+// 在页脚候选（用户实测 selector）中按文本/伪元素文本查找链接。
+function findFootLinkByText(doc, pattern) {
+  if (!doc || typeof doc.querySelectorAll !== "function") return null;
+  const seen = new Set();
+  for (const selector of ["#pc-foot > div > a", "#pc-foot a"]) {
+    for (const link of safeQueryAll(doc, selector)) {
+      if (seen.has(link)) continue;
+      seen.add(link);
+      const text = asString(link.textContent).trim();
+      const pseudo = getElementPseudoText(link);
+      if (!pattern.test(text) && !pattern.test(pseudo)) continue;
+      if (!isElementVisible(link)) continue;
+      if (link.disabled === true || link.getAttribute("aria-disabled") === "true") continue;
+      return link;
     }
   }
-  unipusLog(context, "u校园自动提交：已点击提交按钮，等待平台提交并切下一页。");
-  return true;
+  return null;
+}
+
+function scheduleAutoContinue(context) {
+  resetAutoContinueState();
+  autoContinueState.deadline = Date.now() + AUTO_CONTINUE_TIMEOUT_MS;
+  autoContinueState.timer = setTimeout(() => pollAutoContinue(context), AUTO_CONTINUE_FIRST_DELAY_MS);
+}
+
+function pollAutoContinue(context) {
+  autoContinueState.timer = null;
+  const doc = getContextDocument(context);
+  const link = doc ? findFootLinkByText(doc, /继续学习/) : null;
+  if (link) {
+    autoContinueState.clicked = true;
+    if (clickElementSafely(context, link)) {
+      unipusLog(context, "u校园自动翻页：已点击“继续学习”按钮，等待下一页题目到达。");
+    } else {
+      unipusWarn(context, "u校园自动翻页：“继续学习”按钮点击失败。");
+    }
+    return;
+  }
+  if (Date.now() >= autoContinueState.deadline) {
+    unipusWarn(context, "u校园自动翻页：60 秒内未出现“继续学习”按钮，已停止等待（可手动点击继续）。");
+    return;
+  }
+  autoContinueState.timer = setTimeout(() => pollAutoContinue(context), AUTO_CONTINUE_POLL_MS);
 }
 
 // ==== END SECTION: unipus-auto-submit ====
@@ -2114,6 +2211,9 @@ export function destroy() {
 
   // 停止自动提交调度（未触发的定时器清理）
   resetAutoSubmitState();
+
+  // 停止自动翻页轮询（"继续学习"等待清理）
+  resetAutoContinueState();
 
   // 移除 window "message" 监听
   removeQuestionMessageListener();
