@@ -697,6 +697,8 @@ async function decryptUnipusHexContent(content, k) {
 
 // 题目 JSON 解析：外层数组每项 content 为题目 JSON 字符串；
 // 递归 children 收集叶子题（quesText 非空），题干 = 祖先 direction 文本 + 自身 quesText。
+// 实测形态补充：填空题的题目文本可能在 contents[].text（含 1)____1____ 占位符），
+// 其 children 为无文本空壳（对应填空位），解析时并入 stem、空壳跳过。
 function parseUnipusQuestionJson(plainText) {
   const pick = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
   const questions = [];
@@ -707,22 +709,34 @@ function parseUnipusQuestionJson(plainText) {
     return [];
   }
   const entries = Array.isArray(parsed) ? parsed : [parsed];
+  const contentsText = (node) => {
+    const parts = [];
+    for (const item of Array.isArray(node && node.contents) ? node.contents : []) {
+      const text = stripTagsHtml(asString(item && item.text)).replace(/\s+/g, " ").trim();
+      if (text) parts.push(text);
+    }
+    return parts.join(" ");
+  };
   const collect = (node, ancestorText) => {
     if (!node || typeof node !== "object") return;
     const ownText = stripTagsHtml(asString(node.quesText)).replace(/\s+/g, " ").trim();
+    const ownContents = contentsText(node);
     let stem = ancestorText;
+    // direction 主题干在前，自身 quesText/contents 文本追加在后。
+    const direction = asObject(node.direction);
+    const dirText = stripTagsHtml(
+      asString(pick(direction && direction.pcText, direction && direction.text,
+        direction && direction.mText)),
+    ).replace(/\s+/g, " ").trim();
+    if (dirText) stem = stem ? `${stem} ${dirText}` : dirText;
     if (ownText) {
       stem = stem ? `${stem} ${ownText}` : ownText;
-    } else {
-      const direction = asObject(node.direction);
-      const dirText = stripTagsHtml(
-        asString(pick(direction && direction.pcText, direction && direction.text,
-          direction && direction.mText)),
-      ).replace(/\s+/g, " ").trim();
-      if (dirText) stem = stem ? `${stem} ${dirText}` : dirText;
+    } else if (ownContents) {
+      // 填空题等题型的题目文本可能在 contents[].text。
+      stem = stem ? `${stem} ${ownContents}` : ownContents;
     }
     const children = Array.isArray(node.children) ? node.children : [];
-    if (ownText && !children.length) {
+    if ((ownText || ownContents) && !children.length) {
       // 叶子题：题干非空且无子题。
       const replyType = asString(node.replyType).toLowerCase();
       const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
@@ -748,7 +762,22 @@ function parseUnipusQuestionJson(plainText) {
       });
       return;
     }
+    const countBefore = questions.length;
     for (const child of children) collect(child, stem);
+    if ((ownText || ownContents) && questions.length === countBefore) {
+      // children 为无文本空壳（如填空题的空位占位节点）：节点自身即题目。
+      const replyType = asString(node.replyType).toLowerCase();
+      const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
+        ? UNIPUS_QTYPE_BY_REPLY[replyType]
+        : 4;
+      questions.push({
+        qtype,
+        stem,
+        options: [],
+        inputs: [],
+        isAnswered: () => false,
+      });
+    }
   };
   for (const entry of entries) {
     if (entry && typeof entry === "object") {
