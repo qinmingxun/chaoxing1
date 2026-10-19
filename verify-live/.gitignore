@@ -1,0 +1,6 @@
+node_modules/
+package-lock.json
+server.log
+*.pem
+cert.pfx
+edge-voice-e2e-*/

@@ -1527,6 +1527,12 @@
           }
         }
         fakeAudioStreams.push({ context: context, oscillator: oscillator });
+        // 打标记：MediaRecorder 观测据此识别流来源为合成流（否则误报"其他音频流"）。
+        try {
+          destination.stream.fakeStream = true;
+        } catch (ignoredTagError) {
+          // 平台对象不可扩展时跳过（观测退化为"其他音频流"，不影响功能）。
+        }
         while (fakeAudioStreams.length > FAKE_AUDIO_MAX_STREAMS) {
           var old = fakeAudioStreams.shift();
           try {
