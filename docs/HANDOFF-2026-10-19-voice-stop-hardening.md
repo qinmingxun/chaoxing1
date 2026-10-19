@@ -28,8 +28,19 @@ E:\刷课「刷课助手」MV3 浏览器扩展（GitHub: qinmingxun/chaoxing1，
 
 ## Git State
 
-- 本地已提交：a4dac76「语音停止三级加固：指针序列点击 + 停止文本/伪元素扫描 + bridge 强制 MediaRecorder.stop 回执验证 + 录音中 DOM 快照（AGENT 29）」（6 文件，+315/-29，含 AGENTS.md 首次入库）
-- **未推送**：main 领先 origin/main 1 个提交。直连超时、Clash(7890) 未运行——网络可用后执行：`git -c http.proxy= -c https.proxy= push origin main`
+- 本地已提交（main 领先 origin/main 4 个提交，**未推送**——直连超时/被重置、Clash(7890) 未运行）：
+  - a4dac76 语音停止三级加固（AGENT 29）
+  - 720ee11 交接文档
+  - 2ca34cc 真实浏览器实测全通（deaf/normal）+ fakeStream 标记修复 + verify-live 环境入库
+  - 5a8ca9d AGENT_STATUS：AGENT 30 实测记录
+- 网络可用后执行：`git -c http.proxy= -c https.proxy= push origin main`
+
+## 真实浏览器实测（2026-10-19 追加，AGENT 30）
+
+- **两种模式 ALL-PASS**：deaf（停止按钮拒绝合成点击，复现卡点）→ bridge 强制停止兜底成功；normal（按钮可点）→ 策略 1 指针序列点击命中。全程在真实 Edge 155 + 真实 MediaRecorder 下完成。
+- **"流来源=其他音频流"破案**：bridge 合成流从未打 fakeStream 标记（观测误报），已修复。
+- 实测环境入库 verify-live/：`node run-test.mjs deaf|normal` 可复跑（自动起服务器 + Edge + CDP 断言）。
+- 真实平台仍有差异（SPA 翻页/iframe/真实按钮形态），用户重测日志为准。
 
 ## Recommended Next Action
 
