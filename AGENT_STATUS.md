@@ -151,3 +151,15 @@
 - 发布前终审复核：主控亲自重跑全量快照——12 个 JS 全部 node --check 通过、3 个 JSON 合法、真实 key 特征 0 命中、FINAL_AUDIT.md（79 行）结论 PROJECT COMPLETE 且如实声明验证边界（不声称真实平台验证）。
 - 证据链核对：29 个 Agent 的 PASS 证据在 TEST_REPORT/AGENT_STATUS 中全部可追溯；六辅助文件完整一致。
 - 项目完成：AGENT 00–28 全部 PASS，PROJECT_STATE.json next 置空收尾。
+
+## AGENT 29 主控加固（2026-10-19）
+
+- 背景：语音题"录音停止"点击无效（React 重渲染替换节点）等用户重测期间，主控预先加固停止链路，使下次重测要么直接成功、要么日志一锤定音。
+- unipus.js（unipus-voice 分区）：
+  - 点击升级为真实指针事件序列（pointerdown → mousedown → pointerup → mouseup → click，冒泡 + composed，坐标取元素中心）——覆盖监听 pointer/mouse 事件而非 click 的录音组件；开始与停止按钮统一走 clickRecordTarget（指针序列优先，失败回退原生 click）。
+  - 停止三级策略 tryStopRecording：① 组内"停止"文本最深命中（含伪元素文本，录音态 React 将开始按钮替换为停止文本）→ ② 全页扫描"停止/stop"文本（含伪元素）可见未禁用按钮 → ③ MAIN bridge 强制停止命令。每级经 verifyStopOutcome（600ms 窗口等回执）确认，未确认才进入下一级。
+  - 录音中 DOM 快照 snapshotRecordingDom：录音开始后自动输出 .record-button-group 子元素树（标签/class/文本/可见性）与全页可见停止候选（前 3），免去用户描述 UI。
+  - 回执监听 installVoiceRecordingStateListener（ucampus-recording-state，init 注册幂等、destroy 清理）：recording=false 或 stopRequested=true 即确认停止生效。
+- main-world-bridge.js：MediaRecorder 观测升级——每次构造计数 + 存活引用列表（上限 10）+ 构造/平台自行停止/强制停止三种回执；新输入事件 ucampus-stop-recording（对存活 recorder 逐个 stop，重复 stop 的 InvalidStateError 逐个吞掉）；新输出事件 ucampus-recording-state {recording, recorderCount, stopRequested}。
+- CONTRACTS §2 同步：2.1 增加 stop-recording、2.2 增加 recording-state 契约行与行为说明。
+- 验证：bridge/unipus 两文件语法检查通过；新增 e2e 三场景（组内停止文本命中不动用 bridge / 全页扫描命中 / bridge 强制停止 + 回执确认）全过；回归 12 项全绿（voice-e2e、bridge-fake-audio、spa-cycle、alert-override、choice、choice-multi、option-wrap、fillblank、auto-trigger、keep-alive-antd、concurrency、shared-modules）。

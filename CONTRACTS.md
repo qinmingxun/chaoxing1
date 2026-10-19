@@ -56,6 +56,7 @@
 | `course-helper:main:set-editor` | `{editorId:string, content:string}` |
 | `course-helper:main:set-mobile-editor` | `{index:integer, content:string, itemId?:string}` |
 | `course-helper:main:set-ucampus-answer-queue` | `{answers:string[]}` |
+| `course-helper:main:ucampus-stop-recording` | `{reason:string}` |
 | `course-helper:main:dispose` | `{reason:string}` |
 
 ### 2.2 MAIN → content
@@ -66,9 +67,10 @@
 | `course-helper:main:editor-result` | `{editorId:string, ok:boolean, error?:string}` |
 | `course-helper:main:ucampus-question-data` | `{code:0, content:string, k:string, encrypted:boolean, url:string}` |
 | `course-helper:main:ucampus-submit` | `{url:string, payload:string, usedTime:number, answerCount:integer}` |
+| `course-helper:main:ucampus-recording-state` | `{recording:boolean, recorderCount:integer, stopRequested:boolean}` |
 | `course-helper:main:error` | `{code:string, message:string}` |
 
-MAIN world 的网络钩子只报告数据或改写明确授权的 UCampus 提交；`course-helper:main:ucampus-submit` 的 `payload` 是改写后的 JSON 字符串，不得泄漏 API key。`top.checkJob` 屏蔽和 `window.confirm` 覆写由 `course-helper:main:set-confirm` 的 `enabled:true` 触发，禁用时恢复原引用（若可恢复）。
+MAIN world 的网络钩子只报告数据或改写明确授权的 UCampus 提交；`course-helper:main:ucampus-submit` 的 `payload` 是改写后的 JSON 字符串，不得泄漏 API key。`top.checkJob` 屏蔽和 `window.confirm` 覆写由 `course-helper:main:set-confirm` 的 `enabled:true` 触发，禁用时恢复原引用（若可恢复）。`course-helper:main:ucampus-stop-recording` 使 MAIN bridge 对存活 `MediaRecorder` 逐个调用 `stop()`（与平台停止按钮内部行为一致，触发 onstop 回调），并以 `course-helper:main:ucampus-recording-state` 回执结果（`recording` 是否在录、`recorderCount` 存活数、`stopRequested` 是否为停止命令回执）；录音开始（构造）与任一 `stop` 执行也发出该回执。
 
 ## 3. `chrome.storage.local` 键与默认值
 

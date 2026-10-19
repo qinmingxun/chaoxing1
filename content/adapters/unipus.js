@@ -58,6 +58,11 @@ const MAIN_SOURCE = "course-helper";
 const MAIN_QUESTION_DATA_EVENT = "course-helper:main:ucampus-question-data";
 const MAIN_ANSWER_QUEUE_EVENT = "course-helper:main:set-ucampus-answer-queue";
 const MAIN_CONFIRM_EVENT = "course-helper:main:set-confirm";
+// 语音题停止兜底：MAIN world 对存活 MediaRecorder 直接 stop（React 重渲染替换
+// 节点导致停止按钮点击无效时使用；见 unipus-voice 分区 tryStopRecording 策略 3）。
+const MAIN_STOP_RECORDING_EVENT = "course-helper:main:ucampus-stop-recording";
+// 录音状态回执事件（MAIN → content）：{recording, recorderCount, stopRequested}。
+const MAIN_RECORDING_STATE_EVENT = "course-helper:main:ucampus-recording-state";
 
 // ---- MAIN bridge 注入（标记与文件路径和 loader.js 保持一致）----
 const MAIN_BRIDGE_FLAG = "__COURSE_HELPER_MAIN_WORLD_BRIDGE_INJECTED__";
@@ -2219,9 +2224,122 @@ function installPageFillObserver(context, answers) {
 // （见 main-world-bridge.js 的 installFakeAudioStream：覆写 getUserMedia，
 // 不经过真实麦克风——无权限弹窗、无环境噪声）。
 // 按钮结构（用户实测 selector）：.record-button-group > div:nth-child(2)（麦克风）。
+// 停止卡点加固（2026-10-19）：录音开始后 React 重渲染替换按钮节点，旧引用点击
+// 无效（实测"停不下来"）。三级停止策略见 tryStopRecording；MAIN bridge 侧另有
+// MediaRecorder 强制停止兜底（course-helper:main:ucampus-stop-recording）与录音
+// 状态回执（course-helper:main:ucampus-recording-state，CONTRACTS §2）。
 
 const VOICE_RECORD_DURATION_MS = 3000; // 录音窗口时长
 const VOICE_RECORD_GROUP_SELECTOR = ".record-button-group";
+const VOICE_STOP_VERIFY_DELAY_MS = 600; // 停止点击后的验证等待（React 状态切换）
+
+// 组内"停止"目标（录音态）：取【最深】命中——React 录音组件的原生监听常绑在
+// 文本叶子/图标层，点外层 wrapper 事件不经过深层元素。伪元素渲染文本（css
+// content）的宿主元素也算命中。先序遍历最后一个命中即最深命中。
+function findStopTextTarget(group) {
+  let best = null;
+  for (const element of safeQueryAll(group, "*")) {
+    const text = asString(element.textContent).replace(/\s+/g, "");
+    if (!/停止|stop/i.test(text) && !/停止|stop/i.test(getElementPseudoText(element))) continue;
+    best = element;
+  }
+  return best;
+}
+
+// 真实指针事件序列点击：pointerdown → mousedown → pointerup → mouseup → click
+// （全部冒泡 + composed）。部分录音组件监听 pointer/mouse 事件而非 click，仅
+// element.click() 不触发；事件坐标取元素中心（rect 不可用时取 0，不阻断）。
+function dispatchPointerClick(element) {
+  const view = (element.ownerDocument && element.ownerDocument.defaultView) || getGlobalRoot();
+  const EventConstructor = (view && view.Event) || (typeof Event !== "undefined" ? Event : null);
+  if (!EventConstructor || typeof element.dispatchEvent !== "function") return false;
+  let rect = null;
+  try {
+    rect = element.getBoundingClientRect();
+  } catch (_error) {
+    rect = null;
+  }
+  const clientX = rect && typeof rect.left === "number" ? rect.left + (rect.width || 0) / 2 : 0;
+  const clientY = rect && typeof rect.top === "number" ? rect.top + (rect.height || 0) / 2 : 0;
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    try {
+      element.dispatchEvent(new EventConstructor(type, {
+        bubbles: true, cancelable: true, composed: true, clientX, clientY, button: 0,
+      }));
+    } catch (_error) {
+      // 单个事件派发失败继续后续事件。
+    }
+  }
+  return true;
+}
+
+// 语音按钮点击：指针序列优先，失败回退原生 click（clickElementSafely）。
+function clickRecordTarget(context, element) {
+  if (!element) return false;
+  if (dispatchPointerClick(element)) return true;
+  return clickElementSafely(context, element);
+}
+
+// ---- 录音状态回执（course-helper:main:ucampus-recording-state，CONTRACTS §2.2）----
+// MAIN bridge 回执 payload：{recording:boolean, recorderCount:number, stopRequested:boolean}。
+// recording=false：某次 stop 已执行（平台自行停止或强制停止命令回执）；
+// stopRequested=true：本次回执是 content 停止命令的应答。
+let voiceRecordingStoppedSeen = false;
+let voiceRecordingStateListener = null;
+
+function handleVoiceRecordingStatePayload(payload) {
+  const data = asObject(payload);
+  if (!data) return;
+  if (data.stopRequested === true || data.recording === false) {
+    voiceRecordingStoppedSeen = true;
+  }
+}
+
+function installVoiceRecordingStateListener() {
+  if (voiceRecordingStateListener) return; // 幂等
+  const target = getContextWindow(activeContext) || getGlobalRoot();
+  if (!target || typeof target.addEventListener !== "function") return;
+  voiceRecordingStateListener = (event) => {
+    if (!event) return;
+    const data = event.data;
+    if (!data || data.source !== MAIN_SOURCE) return; // 必须携带 source:"course-helper"
+    if (data.type !== MAIN_RECORDING_STATE_EVENT) return;
+    handleVoiceRecordingStatePayload(asObject(data.payload));
+  };
+  try {
+    target.addEventListener("message", voiceRecordingStateListener, false);
+  } catch (_error) {
+    voiceRecordingStateListener = null;
+  }
+}
+
+function removeVoiceRecordingStateListener() {
+  const target = getContextWindow(activeContext) || getGlobalRoot();
+  const listener = voiceRecordingStateListener;
+  voiceRecordingStateListener = null;
+  if (!target || !listener) return;
+  try {
+    if (typeof target.removeEventListener === "function") {
+      target.removeEventListener("message", listener, false);
+    }
+  } catch (_error) {
+    // 已卸载的 window 清理失败可忽略。
+  }
+}
+
+// 停止结果验证：窗口期内收到任一回执（recording=false 或 stopRequested）即确认。
+// context 参数保留（与 tryStopRecording 签名风格一致，当前无需使用）。
+// 无回执返回 false → 上层继续下一级策略；三级全无回执时最终警告并请用户提供日志。
+async function verifyStopOutcome(context) {
+  void context;
+  voiceRecordingStoppedSeen = false;
+  const deadline = Date.now() + VOICE_STOP_VERIFY_DELAY_MS;
+  while (Date.now() < deadline) {
+    if (voiceRecordingStoppedSeen) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return voiceRecordingStoppedSeen;
+}
 
 function collectRecordButtons(doc) {
   const buttons = [];
@@ -2266,31 +2384,95 @@ function collectRecordButtons(doc) {
   return buttons;
 }
 
-// 停止录音多策略：同位置按钮（实时查询）→ 扫描含"停止"文本的可见按钮
-// （部分平台停止按钮出现在弹层/其他位置）。
+// 录音中 DOM 快照（录音开始后采集一次，自动收集"停止按钮长什么样"的证据，
+// 免去用户描述 UI）：.record-button-group 内子元素树（标签/class/文本/可见性）
+// + 全页可见"停止"文本元素候选（前 3 个）。
+function snapshotRecordingDom(context) {
+  const doc = getContextDocument(context);
+  if (!doc || typeof doc.querySelectorAll !== "function") return;
+  try {
+    const groups = safeQueryAll(doc, VOICE_RECORD_GROUP_SELECTOR);
+    const groupParts = [];
+    for (const group of groups) {
+      for (const element of safeQueryAll(group, "*")) {
+        const text = asString(element.textContent).replace(/\s+/g, " ").trim().slice(0, 20);
+        if (!text) continue;
+        groupParts.push(`${describeElement(element)}${isElementVisible(element) ? "" : "(不可见)"}`);
+      }
+    }
+    const pageStopCandidates = [];
+    for (const selector of ['button', '[role="button"]', 'a', '[class*="btn" i]']) {
+      for (const element of safeQueryAll(doc, selector)) {
+        if (pageStopCandidates.length >= 3) break;
+        const text = asString(element.textContent).replace(/\s+/g, "").trim();
+        const pseudo = getElementPseudoText(element);
+        if (!/停止|stop/i.test(text) && !/停止|stop/i.test(pseudo)) continue;
+        if (!isElementVisible(element)) continue;
+        pageStopCandidates.push(`${describeElement(element)}${pseudo ? `（伪元素文本：${pseudo.slice(0, 12)}）` : ""}`);
+      }
+    }
+    unipusLog(context,
+      `u校园语音题：录音中 DOM 快照——按钮组子元素 [${groupParts.join(" | ") || "无文本子元素"}]；` +
+      `全页可见停止候选 [${pageStopCandidates.join(" | ") || "无"}]。`);
+  } catch (_error) {
+    // 快照仅诊断用，失败不影响录音流程。
+  }
+}
+
+// 停止录音三级策略（每级命中后统一经 verifyStopOutcome 验证）：
+//   1. 组内同位置"停止"目标（录音态下 React 把开始按钮替换为停止文本，实时查询）；
+//   2. 全页扫描含"停止/stop"文本（含伪元素）的可见未禁用按钮（停止按钮可能
+//      在弹层/其他位置）；
+//   3. MAIN bridge 强制停止：对存活 MediaRecorder 直接 stop（与平台停止按钮
+//      内部行为一致，触发 onstop 回调），回执经 ucampus-recording-state 验证。
 async function tryStopRecording(context, index) {
   const doc = getContextDocument(context);
+  // 策略 1：组内同位置按钮（录音态）。点击目标取组内"停止"文本最深命中；
+  // 无命中（停止态未渲染文本）时退回同位置 wrapper 的最深子元素。
   const buttons = collectRecordButtons(doc);
-  if (index < buttons.length) {
-    clickElementSafely(context, buttons[index]);
+  let stopTarget = null;
+  const group = doc ? safeQuery(doc, VOICE_RECORD_GROUP_SELECTOR) : null;
+  if (group) stopTarget = findStopTextTarget(group);
+  if (!stopTarget && index < buttons.length) stopTarget = buttons[index];
+  if (stopTarget) {
+    clickRecordTarget(context, stopTarget);
   }
-  await new Promise((resolve) => setTimeout(resolve, 900));
+  if (await verifyStopOutcome(context)) return "dom";
+
+  // 策略 2：全页扫描"停止/stop"文本（含伪元素文本）的可见未禁用按钮。
   const stopCandidates = [];
   for (const selector of ['button', '[role="button"]', 'a', '.ant-btn', '[class*="btn" i]']) {
     for (const element of safeQueryAll(doc, selector)) {
       const text = asString(element.textContent).replace(/\s+/g, "").trim();
-      if (!/停止|stop/i.test(text)) continue;
+      const pseudo = getElementPseudoText(element);
+      if (!/停止|stop/i.test(text) && !/停止|stop/i.test(pseudo)) continue;
       if (!isElementVisible(element)) continue;
       if (element.disabled === true || element.getAttribute("aria-disabled") === "true") continue;
       stopCandidates.push(element);
     }
   }
   if (stopCandidates.length) {
-    unipusLog(activeContext,
+    unipusLog(context,
       `u校园语音题：尝试点击停止按钮（文本扫描命中 ${describeElement(stopCandidates[0])}）。`);
-    clickElementSafely(context, stopCandidates[0]);
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    clickRecordTarget(context, stopCandidates[0]);
+    if (await verifyStopOutcome(context)) return "dom";
   }
+
+  // 策略 3：MAIN bridge 强制停止 MediaRecorder（React 节点替换导致 DOM 点击
+  // 全部无效时的兜底；recorder.stop 触发平台 onstop，前端进入已录音状态）。
+  const requestSent = postMainMessage(context, MAIN_STOP_RECORDING_EVENT, { reason: "voice-stop" });
+  if (!requestSent) {
+    unipusWarn(context, "u校园语音题：停止命令发送失败（window.postMessage 不可用），录音可能仍在进行。");
+    return "none";
+  }
+  const stopConfirmed = await verifyStopOutcome(context);
+  if (!stopConfirmed) {
+    unipusWarn(context,
+      "u校园语音题：三级停止均未确认生效（未收到 MediaRecorder.stop 回执）。" +
+      "请把以上日志（含录音中 DOM 快照）发给助手分析。");
+    return "none";
+  }
+  return "bridge";
 }
 
 async function simulateVoiceRecordings(context) {
@@ -2314,9 +2496,13 @@ async function simulateVoiceRecordings(context) {
       unipusWarn(context, `u校园语音题：第 ${index + 1} 个录音按钮未找到（可能被重渲染移除），跳过。`);
       continue;
     }
-    clickElementSafely(context, startButtons[index]); // 开始录音
+    clickRecordTarget(context, startButtons[index]); // 开始录音（指针序列优先）
     await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
-    await tryStopRecording(context, index); // 停止（多策略）
+    snapshotRecordingDom(context); // 录音中快照（每题一次，自动收集停止按钮证据）
+    const outcome = await tryStopRecording(context, index); // 三级停止策略
+    if (outcome === "none") {
+      unipusWarn(context, `u校园语音题：第 ${index + 1} 处录音停止未确认，继续下一处。`);
+    }
   }
   return true;
 }
@@ -2691,6 +2877,9 @@ export async function init(ctx) {
   // ucampus-question-data 消息监听（拦截题目数据缓存到模块内）。
   installQuestionInterceptor();
 
+  // 语音题停止回执监听（ucampus-recording-state，幂等）：三级停止策略的验证通道。
+  installVoiceRecordingStateListener();
+
   // 主控接线：立即尝试一次自动答题（题目数据可能已拦截）；未成功时由
   // 题目数据事件（handleQuestionDataPayload → triggerAutoAnswerOnce）驱动重试。
   void triggerAutoAnswerOnce();
@@ -2718,6 +2907,9 @@ export function destroy() {
 
   // 移除 window "message" 监听
   removeQuestionMessageListener();
+
+  // 移除语音题录音状态回执监听（ucampus-recording-state）
+  removeVoiceRecordingStateListener();
 
   // 恢复 MAIN world 的 confirm 覆写（installSubmitInterceptor 启用过才发）
   disableSubmitInterceptor(context);

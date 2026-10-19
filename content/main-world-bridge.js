@@ -21,6 +21,7 @@
     'course-helper:main:set-editor',
     'course-helper:main:set-mobile-editor',
     'course-helper:main:set-ucampus-answer-queue',
+    'course-helper:main:ucampus-stop-recording',
     'course-helper:main:dispose'
   ];
   var OUTPUT_EVENTS = {
@@ -28,6 +29,7 @@
     EDITOR_RESULT: 'course-helper:main:editor-result',
     QUESTION_DATA: 'course-helper:main:ucampus-question-data',
     SUBMIT: 'course-helper:main:ucampus-submit',
+    RECORDING_STATE: 'course-helper:main:ucampus-recording-state',
     ERROR: 'course-helper:main:error'
   };
   var hasOwn = Object.prototype.hasOwnProperty;
@@ -1174,6 +1176,9 @@
         case 'course-helper:main:set-ucampus-answer-queue':
           setAnswerQueue(payload, requestId);
           return;
+        case 'course-helper:main:ucampus-stop-recording':
+          handleStopRecordingCommand(requestId);
+          return;
         case 'course-helper:main:dispose':
           if (!isObject(payload) || typeof payload.reason !== 'string') {
             reportError('INVALID_DISPOSE', 'dispose payload 无效', requestId);
@@ -1356,34 +1361,61 @@
     }
   }
 
-  // ---- MediaRecorder 观测 ----
-  // 覆写构造器记录首次构造（录音真正开始的信号）：流来源为合成流（fakeStream
-  // 标记）说明音频注入生效；来源为其他（如真实麦克风/iframe 流）说明平台
-  // 录音路径未经过本覆写，需要进一步适配。
+  // ---- MediaRecorder 观测与强制停止兜底 ----
+  // 覆写构造器：1) 每次构造计数并回报（录音真正开始的信号）；流来源为合成流
+  // （fakeStream 标记）说明音频注入生效；来源为其他（如真实麦克风/iframe 流）
+  // 说明平台录音路径未经过本覆写，需要进一步适配。2) 保留存活 recorder 引用：
+  // content 侧点击"停止"无效时（React 重渲染替换节点），经 ucampus-stop-recording
+  // 事件从 MAIN world 直接调 recorder.stop()——与平台停止按钮内部行为一致
+  // （触发 onstop 回调，前端进入已录音状态）。
+  var liveRecorders = [];
+
+  function describeRecorderSource(stream) {
+    try {
+      if (stream && stream.fakeStream === true) {
+        return '合成音频流';
+      }
+      if (stream && stream.getAudioTracks && stream.getAudioTracks().length) {
+        return '其他音频流（真实麦克风或 iframe）';
+      }
+      return '无音频轨';
+    } catch (ignoredStreamReadError) {
+      return '未知';
+    }
+  }
+
+  // 录音状态回执（ucampus-recording-state）：recording 是否在录、存活 recorder
+  // 数、stopRequested 是否为 content 强制停止命令的回执。
+  function emitRecordingState(recording, recorderCount, stopRequested) {
+    emit(OUTPUT_EVENTS.RECORDING_STATE, {
+      recording: recording === true,
+      recorderCount: recorderCount,
+      stopRequested: stopRequested === true
+    });
+  }
+
   function installMediaRecorderProbe() {
     var OriginalRecorder = globalWindow.MediaRecorder;
     if (!OriginalRecorder || OriginalRecorder.__courseHelperProbe) {
       return;
     }
-    var probed = false;
     function MediaRecorderProbe(stream, options) {
-      if (!probed) {
-        probed = true;
-        var source = '未知';
-        try {
-          source = stream && stream.fakeStream === true ? '合成音频流' :
-            (stream && stream.getAudioTracks && stream.getAudioTracks().length ? '其他音频流（真实麦克风或 iframe）' : '无音频轨');
-        } catch (ignoredStreamReadError) {
-          source = '未知';
-        }
-        console.log('[course-helper] MAIN bridge：MediaRecorder 已构造（平台开始录音，流来源=' + source + '）。');
-      }
       var recorder = new OriginalRecorder(stream, options);
+      liveRecorders.push(recorder);
+      // 只保留最近 10 个存活引用（防长会话内存膨胀）；出列引用不强制 stop（stop 幂等）。
+      while (liveRecorders.length > 10) {
+        liveRecorders.shift();
+      }
+      console.log('[course-helper] MAIN bridge：MediaRecorder 已构造（第 ' +
+        liveRecorders.length + ' 个存活记录，流来源=' + describeRecorderSource(stream) + '）。');
+      emitRecordingState(true, liveRecorders.length, false);
       // stop 观测：平台停止录音时调用（每次 log，用于定位"停不下来"）。
       if (recorder && typeof recorder.stop === 'function') {
         var originalStop = recorder.stop.bind(recorder);
         recorder.stop = function probedStop() {
           console.log('[course-helper] MAIN bridge：MediaRecorder.stop 被调用（平台停止录音）。');
+          // 平台自行停止也回执（content 据此判断停止是否生效）。
+          emitRecordingState(false, liveRecorders.length, false);
           return originalStop.apply(this, arguments);
         };
       }
@@ -1393,6 +1425,25 @@
     MediaRecorderProbe.isTypeSupported = OriginalRecorder.isTypeSupported;
     MediaRecorderProbe.__courseHelperProbe = true;
     globalWindow.MediaRecorder = MediaRecorderProbe;
+  }
+
+  // content 侧停止命令：对存活 recorder 逐个 stop（重复 stop 已停止的 recorder
+  // 会抛 InvalidStateError，逐个 try/catch 吞掉），并回执停止后状态。
+  function handleStopRecordingCommand() {
+    var stopped = 0;
+    for (var i = 0; i < liveRecorders.length; i += 1) {
+      try {
+        if (liveRecorders[i] && typeof liveRecorders[i].stop === 'function') {
+          liveRecorders[i].stop();
+          stopped += 1;
+        }
+      } catch (ignoredStopError) {
+        // 已停止/已失活的 recorder 安全跳过。
+      }
+    }
+    console.log('[course-helper] MAIN bridge：停止录音命令已执行（对 ' + stopped +
+      ' 个存活 MediaRecorder 调用 stop）。');
+    emitRecordingState(false, liveRecorders.length, true);
   }
 
   function disposeBridge() {
