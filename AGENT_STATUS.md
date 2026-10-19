@@ -163,3 +163,12 @@
 - main-world-bridge.js：MediaRecorder 观测升级——每次构造计数 + 存活引用列表（上限 10）+ 构造/平台自行停止/强制停止三种回执；新输入事件 ucampus-stop-recording（对存活 recorder 逐个 stop，重复 stop 的 InvalidStateError 逐个吞掉）；新输出事件 ucampus-recording-state {recording, recorderCount, stopRequested}。
 - CONTRACTS §2 同步：2.1 增加 stop-recording、2.2 增加 recording-state 契约行与行为说明。
 - 验证：bridge/unipus 两文件语法检查通过；新增 e2e 三场景（组内停止文本命中不动用 bridge / 全页扫描命中 / bridge 强制停止 + 回执确认）全过；回归 12 项全绿（voice-e2e、bridge-fake-audio、spa-cycle、alert-override、choice、choice-multi、option-wrap、fillblank、auto-trigger、keep-alive-antd、concurrency、shared-modules）。
+
+## AGENT 30 主控真实浏览器实测（2026-10-19）
+
+- 环境：真实 Edge 155 headless（--load-extension 实测仍被 Edge 接受）+ 本地 HTTPS 服务器（node-forge 自签证书，--host-resolver-rules 把 u.unipus.cn 映射到 127.0.0.1:9445 + --ignore-certificate-errors + --unsafely-treat-insecure-origin-as-secure）。仿真页具备：真实 MediaRecorder 录音组件（React 式整组 cloneNode 重建替换节点）、选项点击、前端"未录音拦截提交"校验、提交端点记录。环境入库 verify-live/（server.mjs + page.html + run-test.mjs，.gitignore 排除 node_modules/pem/临时 profile）。
+- **deaf 模式**（停止按钮拒绝一切 isTrusted=false 的合成点击，精确复现"录了停不下来"卡点）：**ALL-PASS**——扩展拦截加密题目→解密→识别语音题→点开始录音（合成音频流）→ 停止三级策略 1/2 均未确认 → 策略 3 bridge 强制停止 → 回执确认 → 页面显示"已录音 ✓（bridge 强制停止，4s）"→ 前端校验通过 → 自动提交成功。
+- **normal 模式**（停止按钮接受真实点击）：**ALL-PASS**——策略 1 组内停止文本经指针序列点击命中，"已录音 ✓（按钮点击，3s）"，未动用 bridge。
+- **破案**：交接文档遗留疑问"流来源显示其他音频流"根因 = bridge 的 installFakeAudioStream 返回合成流时从未打 fakeStream 标记。已修复（destination.stream.fakeStream = true），修复后日志正确显示"流来源=合成音频流"。
+- 防御验证：仿真页提交载荷叶子数与队列不匹配时，bridge 按设计拒绝注入并原样放行（"答案队列不足"警告），页面提交不被阻断——降级路径符合预期。
+- 已知差异（相对真实平台）：仿真页无 DeepSeek 求解环节（纯语音页不需要）、无 SPA 翻页、无 iframe 嵌套；真实平台的停止按钮 selector/形态仍以用户重测日志为准。
