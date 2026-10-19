@@ -6,8 +6,8 @@ u校园/超星/智慧树自动刷课扩展。纯原生 JS 零构建，GitHub: qi
 ## 状态文档（按权威顺序，动手前必读）
 
 1. `PROJECT_STATE.json` — 多 Agent 总控状态机（AGENT 00–28 的 PASS/PENDING/BLOCKED）
-2. `AGENT_STATUS.md` — Agent 事件流水
-3. `docs/HANDOFF-2026-10-18-u-campus-voice.md` — 最近交接文档（当前主线卡点）
+2. `AGENT_STATUS.md` — Agent 事件流水（含 AGENT 29/30：语音停止加固与真实浏览器实测）
+3. `docs/HANDOFF-2026-10-19-voice-stop-hardening.md` — 最近交接文档（语音停止加固 + 实测结果）
 4. `REMAINING_TODO.md` — 刻意保持的遗留项（DOM 待核对、u校园题目解密已破解等）
 5. `spec/INDEX.md` — 规格分节索引（FULL_SPEC 拆分）
 6. `CONTRACTS.md` / `FINAL_AUDIT.md` / `TEST_REPORT.md` — 契约与验收
@@ -24,6 +24,9 @@ u校园 AI 版全自动刷课循环：拦截新题 → 解密求解（DeepSeek�
 
 ## 环境注意
 
-- 测试：用户在 Edge 实测（edge://extensions 重载扩展 + 页面 Ctrl+Shift+R）
-- git 推送：`git -c http.proxy= -c https.proxy= push origin main`（空代理直连）
+- 测试：用户在 Edge 实测（edge://extensions 重载扩展 + 页面 Ctrl+Shift+R）；本地真实浏览器实测环境见 `verify-live/`（`node run-test.mjs deaf|normal`，AGENT 30 双模式全通）
+- git 推送（FastGithub 反向代理模式，2026-10-19 实测可用；原空代理直连已被墙）：
+  1. 确认 FastGithub 在运行：`D:\FastGithub\publish\fastgithub_win-x64\FastGithub.UI.exe`（服务进程 fastgithub.exe 监听 127.0.0.1:443）
+  2. `git -c credential.helper=wincred -c http.sslBackend=schannel -c http.schannelCheckRevoke=false -c http.curloptResolve=github.com:443:127.0.0.1 push origin main`
+  （原理：curloptResolve 把 github.com 钉到本机走 FastGithub 隧道；schannelCheckRevoke=false 绕过其自签 CA 的吊销检查失败；openssl 后端本机 git 不支持，用 schannel）
 - DeepSeek API：官方直连 `https://api.deepseek.com`，key 在扩展配置里由用户填写
