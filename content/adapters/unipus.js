@@ -2291,11 +2291,40 @@ function dispatchPointerClick(element) {
   return true;
 }
 
-// 语音按钮点击：指针序列优先，失败回退原生 click（clickElementSafely）。
-function clickRecordTarget(context, element) {
+// 通用点击（页脚提交/下一题/继续学习）：指针事件序列优先（覆盖只监听 pointer/mouse
+// 的组件，2026-10-20 实测平台页脚按钮可能如此），失败回退原生 click。
+function clickWithPointerSequence(context, element) {
   if (!element) return false;
   if (dispatchPointerClick(element)) return true;
   return clickElementSafely(context, element);
+}
+
+// 语音按钮点击：指针序列优先，失败回退原生 click（clickElementSafely）。
+function clickRecordTarget(context, element) {
+  return clickWithPointerSequence(context, element);
+}
+
+// 点击后短窗口捕获平台提示弹窗文本（前端校验拦截原因，如"请先录音/录音不完整"）。
+// 覆盖 antd/自绘弹窗常见容器；仅在点击后调用，不影响其他流程。
+function capturePageFeedback(context, waitMs) {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      const doc = getContextDocument(context);
+      if (!doc) { resolve(""); return; }
+      const messages = [];
+      for (const selector of [
+        ".ant-message-notice-content", ".ant-modal-body", ".ant-notification-notice-message",
+        '[class*="toast" i]', '[class*="message" i]', '[class*="tip" i]', '[role="alert"]',
+      ]) {
+        for (const element of safeQueryAll(doc, selector)) {
+          if (!isElementVisible(element)) continue;
+          const text = asString(element.textContent).replace(/\s+/g, " ").trim().slice(0, 120);
+          if (text && !messages.includes(text)) messages.push(text);
+        }
+      }
+      resolve(messages.slice(0, 3).join(" | "));
+    }, waitMs);
+  });
 }
 
 // ---- 录音状态回执（course-helper:main:ucampus-recording-state，CONTRACTS §2.2）----
@@ -2734,9 +2763,15 @@ function clickSubmitButton(context) {
   }
   let clickPathname = "";
   try { clickPathname = asString(context && context.location && context.location.pathname); } catch (_e) { clickPathname = ""; }
-  if (clickElementSafely(context, found.element)) {
+  if (clickWithPointerSequence(context, found.element)) {
     unipusLog(context,
-      `u校园自动提交：已点击提交按钮（${describeElement(found.element)}），等待平台提交并切下一页。`);
+      `u校园自动提交：已点击提交按钮（${describeElement(found.element)}，指针序列），等待平台提交并切下一页。`);
+    // 点击后 1.2 秒捕获平台提示（校验拦截原因：请先录音/录音不完整等）
+    void capturePageFeedback(context, 1200).then((feedback) => {
+      if (feedback) {
+        unipusWarn(context, `u校园自动提交：点击后平台提示「${feedback}」`);
+      }
+    });
     // 提交观测：8 秒内未观察到提交请求则警告（前端校验拦截/按钮不可用）。
     // 例外：语音题"下一题"可能为纯前端翻页（无 /submit 请求）——若按钮组已消失或
     // pathname 变化，视为翻页成功，不告警。
@@ -2817,8 +2852,12 @@ function pollAutoContinue(context) {
   const link = doc ? findFootLinkByText(doc, /继续学习|下一题/) : null;
   if (link) {
     autoContinueState.clicked = true;
-    if (clickElementSafely(context, link)) {
-      unipusLog(context, "u校园自动翻页：已点击页脚翻页按钮（继续学习/下一题），等待下一页题目到达。");
+    if (clickWithPointerSequence(context, link)) {
+      unipusLog(context,
+        `u校园自动翻页：已点击页脚翻页按钮（${describeElement(link)}，指针序列），等待下一页题目到达。`);
+      void capturePageFeedback(context, 1200).then((feedback) => {
+        if (feedback) unipusWarn(context, `u校园自动翻页：点击后平台提示「${feedback}」`);
+      });
     } else {
       unipusWarn(context, "u校园自动翻页：页脚翻页按钮点击失败。");
     }
