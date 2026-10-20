@@ -1715,6 +1715,12 @@
     // 兜底：平台脚本可能在 document_start 后加载，接管可能没成功——
     // 直接从 window 找 Html5Recorder 实例调 stopRecord。
     var forcedStopped = forceStopPlatformRecorders();
+    // 终局开关：chunk 改写注入的 __CH_FORCE_NOT_RECORDING__（若已生效）
+    // 让 questionEventHandler 的 isRecording() 返回 false——提交校验放行。
+    try {
+      globalWindow.__CH_FORCE_NOT_RECORDING__ = true;
+      console.log('[course-helper] MAIN bridge：已激活 isRecording=false 开关（chunk 改写模式）。');
+    } catch (ignoredFlagError) {}
     console.log('[course-helper] MAIN bridge：停止录音命令已执行（SOE.stop ' + soeStopped +
       ' 个 / 平台 stopRecord ' + platformStopped + ' 个 / 兜底 ' + forcedStopped +
       ' 个 / MediaRecorder.stop ' + stopped + ' 个）。');
@@ -1936,6 +1942,100 @@
     }
   }
 
+  // ---- 平台 chunk 源码改写（2026-10-20 终局方案）----
+  // 背景：提交拦截源 questionEventHandler 闭包内 this.isRecording() 引用
+  // webpack 模块闭包的 BD1 单例——window 不可达，组件层 patch 全部无效（实测）。
+  // 方案：bridge 以 document_start 先于平台脚本运行。用 MutationObserver 监听
+  // <head> 新增的 platform chunk <script>，在其执行前把 src 指向改写版：
+  // 在 isRecording 方法定义处注入 hook——收到 ucampus-stop-recording 命令后
+  // 强制返回 false（录音已由扩展停止，平台前端校验放行，提交/翻页解锁）。
+  // 改写用 Service Worker/Blob URL 交付，保持同源执行。
+  var platformScriptRewritten = false;
+
+  function rewritePlatformChunkSource(sourceText) {
+    // 目标（question-common chunk）：{key:"isRecording",value:function(){...原逻辑...}}
+    // 改写：方法体最前插入全局开关短路（不改动其余任何结构，杜绝语法破坏）：
+    //   function(){ if(window.__CH_FORCE_NOT_RECORDING__===true){return false} ...原逻辑... }
+    var marker = '"isRecording",value:function(){';
+    var idx = sourceText.indexOf(marker);
+    if (idx === -1) {
+      console.log('[course-helper] MAIN bridge：chunk 中未找到 isRecording 定义，未改写。');
+      return null;
+    }
+    var guard = 'if(window.__CH_FORCE_NOT_RECORDING__===true){return false}';
+    var patched = sourceText.slice(0, idx + marker.length) + guard +
+      sourceText.slice(idx + marker.length);
+    // 前置全局开关初始化（默认 false，不影响平台原生行为）
+    var prelude = 'window.__CH_FORCE_NOT_RECORDING__=false;';
+    return prelude + patched;
+  }
+
+  function installPlatformScriptRewriter() {
+    if (!globalWindow.document || typeof MutationObserver !== 'function') {
+      return;
+    }
+    var observer = new MutationObserver(function (mutations) {
+      for (var mi = 0; mi < mutations.length; mi += 1) {
+        var added = mutations[mi].addedNodes;
+        for (var ni = 0; ni < added.length; ni += 1) {
+          var node = added[ni];
+          if (!node || node.tagName !== 'SCRIPT' || !node.src) continue;
+          if (!/question-common|common-[a-f0-9]+\.js/i.test(node.src)) continue;
+          if (platformScriptRewritten) continue;
+          platformScriptRewritten = true;
+          // 拦截：移除 src，改写后以行内执行（MutationObserver 微任务先于脚本执行）
+          var originalSrc = node.src;
+          try {
+            // 暂停该脚本：先移除 src 属性阻止立即执行
+            node.removeAttribute('src');
+            fetch(originalSrc)
+              .then(function (resp) { return resp.text(); })
+              .then(function (text) {
+                var rewritten = rewritePlatformChunkSource(text);
+                if (rewritten === null) {
+                  // 改写失败：回退原 src 执行（保平台可用）
+                  var s = document.createElement('script');
+                  s.src = originalSrc;
+                  document.head.appendChild(s);
+                  return;
+                }
+                console.log('[course-helper] MAIN bridge：已改写平台 chunk（isRecording 开关注入，长度 ' + rewritten.length + '）。');
+                // 语法自检：改写产物必须是合法 JS（失败则回退原脚本，防平台瘫痪）
+                try { new Function(rewritten); } catch (syntaxError) {
+                  console.log('[course-helper] MAIN bridge：改写产物语法错误，回退原脚本：' +
+                    (syntaxError && syntaxError.message ? syntaxError.message : 'unknown'));
+                  var sFallback = document.createElement('script');
+                  sFallback.src = originalSrc;
+                  document.head.appendChild(sFallback);
+                  return;
+                }
+                var blob = new Blob([rewritten], { type: 'text/javascript' });
+                var url = URL.createObjectURL(blob);
+                var s2 = document.createElement('script');
+                s2.src = url;
+                s2.onload = function () { URL.revokeObjectURL(url); };
+                document.head.appendChild(s2);
+              })
+              .catch(function (err) {
+                console.log('[course-helper] MAIN bridge：chunk 改写失败，回退原脚本：' +
+                  (err && err.message ? err.message : 'unknown'));
+                var s3 = document.createElement('script');
+                s3.src = originalSrc;
+                document.head.appendChild(s3);
+              });
+            // 移除原节点（已被移除 src 不会执行）
+            if (node.parentNode) node.parentNode.removeChild(node);
+          } catch (ignoredRewriteError) {
+            // 异常兜底：还原 src
+            node.src = originalSrc;
+          }
+        }
+      }
+    });
+    observer.observe(globalWindow.document.documentElement, { childList: true, subtree: true });
+    console.log('[course-helper] MAIN bridge：平台 chunk 改写器已就绪（等待 question/common 加载）。');
+  }
+
   installCommunication();
   installXhrHook();
   installFetchHook();
@@ -1946,4 +2046,6 @@
   installMediaRecorderProbe();
   // 平台 Html5Recorder 接管：停止时调其 stopRecord() 清除"正在录音中"状态。
   installPlatformRecorderProbe();
+  // 终局方案：平台 chunk 源码改写（isRecording 全局开关）。
+  installPlatformScriptRewriter();
 })(typeof window !== 'undefined' ? window : null);

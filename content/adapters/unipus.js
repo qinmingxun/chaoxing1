@@ -2922,9 +2922,10 @@ function findSubmitButton(doc) {
   const stats = { total: 0, foot: 0, footVisible: 0, withText: 0, texts: [], pseudo: [] };
   let footFallback = null; // 页脚最后一个可见未禁用的链接（提交按钮兜底，通常在页脚末尾）
   const consider = (element, isFoot) => {
-    const text = asString(element.textContent).trim();
-    const pseudo = isFoot ? getElementPseudoText(element) : "";
-    // 语音题页脚按钮为"下一题"（2026-10-20 实测），与"提交"同级命中。
+    // 2026-10-20 实测：普通题页脚按钮文本为"提 交"（含全角/半角空格）——
+    // 匹配前压缩空白，"提 交"=="提交"。语音题页为"下一题"。
+    const text = asString(element.textContent).replace(/\s+/g, "").trim();
+    const pseudo = isFoot ? getElementPseudoText(element).replace(/\s+/g, "") : "";
     if (/提交|下一题/.test(text) || /提交|下一题/.test(pseudo)) stats.withText += 1;
     if (stats.texts.length < 5 && /提交|下一题/.test(text)) stats.texts.push(text.slice(0, 24));
     if (stats.pseudo.length < 5 && pseudo) stats.pseudo.push(pseudo.slice(0, 24));
@@ -3089,8 +3090,8 @@ function findFootLinkByText(doc, pattern) {
     for (const link of safeQueryAll(doc, selector)) {
       if (seen.has(link)) continue;
       seen.add(link);
-      const text = asString(link.textContent).trim();
-      const pseudo = getElementPseudoText(link);
+      const text = asString(link.textContent).replace(/\s+/g, "").trim();
+      const pseudo = getElementPseudoText(link).replace(/\s+/g, "");
       if (!pattern.test(text) && !pattern.test(pseudo)) continue;
       if (!isElementVisible(link)) continue;
       if (link.disabled === true || link.getAttribute("aria-disabled") === "true") continue;
