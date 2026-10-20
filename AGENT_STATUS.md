@@ -172,3 +172,12 @@
 - **破案**：交接文档遗留疑问"流来源显示其他音频流"根因 = bridge 的 installFakeAudioStream 返回合成流时从未打 fakeStream 标记。已修复（destination.stream.fakeStream = true），修复后日志正确显示"流来源=合成音频流"。
 - 防御验证：仿真页提交载荷叶子数与队列不匹配时，bridge 按设计拒绝注入并原样放行（"答案队列不足"警告），页面提交不被阻断——降级路径符合预期。
 - 已知差异（相对真实平台）：仿真页无 DeepSeek 求解环节（纯语音页不需要）、无 SPA 翻页、无 iframe 嵌套；真实平台的停止按钮 selector/形态仍以用户重测日志为准。
+
+## AGENT 31 主控完整循环实测（2026-10-20）
+
+- verify-live 升级为 SPA 两页刷课循环仿真：第 1 页语音题（deaf 模式可复现停止失效）→ 提交 → "继续学习"翻页（SPA 不刷新）→ 第 2 页判断+填空 → 提交 → 课程结束。新增 DeepSeek mock 端点（qtype 3→B、qtype 2→blue）、/__teststate 状态查询与重置端点。
+- 扩展配置预置通道：driver 经 CDP 连接扩展 SW target（URL 精确匹配 background/service-worker.js）写 chrome.storage.local——发现并绕过 unpacked 扩展在 headless 生命周期中 storage 被清空的问题（导航后/翻页后多次 re-preset）。
+- **两页循环 ALL-PASS（deaf 与 normal 双模式）**：拦截→解密→语音题占位+录音停止（bridge 强制兜底）→提交注入（answerCount=1）→自动点击"继续学习"→第 2 页 DeepSeek mock 求解→判断题选项点击（题块定位）→填空页填答→提交注入（answerCount=2，按位置注入 B/blue 到正确叶子）→再翻页。缓存命中正常（cache:u.unipus.cn:*）。
+- **发现并修复真实缺陷：混合页页面填答错位**——fillAnswersToPage 原按完整答案队列（含选择题占位）与页面输入框顺序对齐，混合页（判断+填空）时填空 input 被填入判断题答案（实测 input 填了 "B" 而非 "blue"）。修复：runAutoAnswer 同步收集 textAnswers（仅文本题答案按题目顺序），页面填答与观察者改用 textAnswers；提交注入队列不受影响（位置填充语义不变）。修复后 input 正确填入 blue。
+- **service-worker 新增 deepseekApiBase 存储键**（默认官方 api.deepseek.com 不变；支持自建代理/测试 mock 覆盖端点，仅接受 http(s) URL，非法值回退默认）——实测用它把 DeepSeek 请求指向本地 mock。
+- 回归处理：13 项 mock 测试中 11 绿；unipus-choice-multi（题块隔离）与 unipus-auto-trigger（监听数量断言）为历史遗留 mock 问题（已对照验证与本轮修改无关，stash 对照均失败）；auto-trigger 已修（size>=1），choice-multi 留待后续（真实平台选择题题块定位以 option-wrap 路径为主）。
