@@ -2440,8 +2440,25 @@ function snapshotRecordingDom(context) {
         pageStopCandidates.push(`${describeElement(element)}${pseudo ? `（伪元素文本：${pseudo.slice(0, 12)}）` : ""}`);
       }
     }
+    // 第一组 wrap 的内部结构（按钮真实形态：svg/button/监听层；开始态+点击后各采一次）
+    let wrapDetail = "无";
+    const firstWrap = safeQuery(doc, VOICE_RECORD_BUTTON_SELECTOR);
+    if (firstWrap) {
+      const childParts = [];
+      for (const child of safeQueryAll(firstWrap, "*")) {
+        const cls = asString(child.className).slice(0, 40);
+        let rect = null;
+        try { rect = child.getBoundingClientRect(); } catch (_e) { rect = null; }
+        const size = rect ? `${Math.round(rect.width)}x${Math.round(rect.height)}` : "?";
+        childParts.push(`<${asString(child.tagName).toLowerCase()} class="${cls}" ${size}`);
+      }
+      let html = "";
+      try { html = asString(firstWrap.innerHTML).replace(/\s+/g, " ").slice(0, 300); } catch (_e) { html = "?"; }
+      wrapDetail = `子元素[${childParts.join(" | ") || "无"}] innerHTML=${html}`;
+    }
     unipusLog(context,
       `u校园语音题：录音中 DOM 快照——按钮组子元素 [${groupParts.join(" | ") || "无文本子元素"}]；` +
+      `录音按钮细节 ${wrapDetail}；` +
       `全页可见停止候选 [${pageStopCandidates.join(" | ") || "无"}]。`);
   } catch (_error) {
     // 快照仅诊断用，失败不影响录音流程。
@@ -2525,8 +2542,21 @@ async function simulateVoiceRecordings(context) {
       unipusWarn(context, `u校园语音题：第 ${index + 1} 个录音按钮未找到（可能被重渲染移除），跳过。`);
       continue;
     }
-    clickRecordTarget(context, startButtons[index]); // 开始录音（指针序列优先）
-    await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
+    const clickTarget = startButtons[index];
+    const clickOk = clickRecordTarget(context, clickTarget); // 开始录音（指针序列优先）
+    unipusLog(context,
+      `u校园语音题：第 ${index + 1} 处开始录音点击${clickOk ? "已派发" : "失败"}，目标 ${describeElement(clickTarget)}。`);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // 点击后 UI 态采样：wrap class 是否变化（React 录音态一般换 class 或加子节点）
+    const wrapAfterClick = safeQuery(getContextDocument(context), VOICE_RECORD_BUTTON_SELECTOR);
+    if (wrapAfterClick) {
+      const clsAfter = asString(wrapAfterClick.className).slice(0, 60);
+      let htmlAfter = "";
+      try { htmlAfter = asString(wrapAfterClick.innerHTML).replace(/\s+/g, " ").slice(0, 120); } catch (_e) { htmlAfter = "?"; }
+      unipusLog(context,
+        `u校园语音题：点击后按钮态 class="${clsAfter}" innerHTML=${htmlAfter}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS - 400));
     snapshotRecordingDom(context); // 录音中快照（每题一次，自动收集停止按钮证据）
     const outcome = await tryStopRecording(context, index); // 三级停止策略
     if (outcome === "none") {
@@ -2702,16 +2732,32 @@ function clickSubmitButton(context) {
       "），请提供提交按钮 selector 以便补充查找规则。");
     return false;
   }
+  let clickPathname = "";
+  try { clickPathname = asString(context && context.location && context.location.pathname); } catch (_e) { clickPathname = ""; }
   if (clickElementSafely(context, found.element)) {
-    unipusLog(context, "u校园自动提交：已点击提交按钮，等待平台提交并切下一页。");
+    unipusLog(context,
+      `u校园自动提交：已点击提交按钮（${describeElement(found.element)}），等待平台提交并切下一页。`);
     // 提交观测：8 秒内未观察到提交请求则警告（前端校验拦截/按钮不可用）。
+    // 例外：语音题"下一题"可能为纯前端翻页（无 /submit 请求）——若按钮组已消失或
+    // pathname 变化，视为翻页成功，不告警。
+    const clickedText = asString(found.element.textContent).trim();
     resetSubmitObservation();
     submitObserveTimer = setTimeout(() => {
       submitObserveTimer = null;
-      if (!submitObserved) {
-        unipusWarn(context,
-          "u校园自动提交：点击后 8 秒未观察到提交请求（平台前端校验拦截或提交按钮不可用？请检查页面状态与弹窗）。");
+      if (submitObserved) return;
+      const docNow = getContextDocument(context);
+      const groupGone = !docNow || !safeQuery(docNow, VOICE_RECORD_GROUP_SELECTOR);
+      let pathChanged = false;
+      try {
+        pathChanged = Boolean(context && context.location &&
+          asString(context.location.pathname) !== clickPathname);
+      } catch (_error) { pathChanged = false; }
+      if (/下一题/.test(clickedText) && (groupGone || pathChanged)) {
+        unipusLog(context, "u校园自动提交：'下一题'点击后无提交请求但页面已切换（语音题纯前端翻页），正常。");
+        return;
       }
+      unipusWarn(context,
+        "u校园自动提交：点击后 8 秒未观察到提交请求（平台前端校验拦截或按钮不可用？请检查页面状态与弹窗）。");
     }, 8000);
     return true;
   }
