@@ -1951,6 +1951,10 @@ export async function runAutoAnswer(ctx) {
     solvablePositionByIndex[originalIndex] = position;
   });
   const answers = [];
+  // 页面填答专用：仅文本题（填空/简答）的答案，按题目顺序收集。混合页（选择题+
+  // 填空题）时页面输入框只对应文本题——完整队列含选择题占位，按序对齐会错位
+  // （真实浏览器实测 AGENT 31 发现：input 被填入判断题答案 "B"）。
+  const textAnswers = [];
   let missing = 0;
   for (let index = 0; index < questions.length; index += 1) {
     const question = questions[index];
@@ -1964,6 +1968,8 @@ export async function runAutoAnswer(ctx) {
       }
       continue;
     }
+    const qtype = question && question.qtype;
+    const isTextQuestion = (qtype === 2 || qtype === 4);
     const solvablePosition = solvablePositionByIndex[index];
     const result = solvablePosition !== undefined && solvablePosition < results.length
       ? results[solvablePosition] : null;
@@ -1984,9 +1990,12 @@ export async function runAutoAnswer(ctx) {
           missing += 1;
         }
         answers.push(trimmed);
+        if (isTextQuestion && trimmed) textAnswers.push(trimmed);
       }
     } else {
-      answers.push(stripQuestionNumber(answer));
+      const cleaned = stripQuestionNumber(answer);
+      answers.push(cleaned);
+      if (isTextQuestion && cleaned) textAnswers.push(cleaned);
     }
   }
   if (missing > 0) {
@@ -2004,14 +2013,14 @@ export async function runAutoAnswer(ctx) {
     const qtype = question && question.qtype;
     return (qtype === 2 || qtype === 4) && question.__isVoice !== true;
   });
-  let pageFilled = fillAnswersToPage(getContextDocument(context), answers);
+  let pageFilled = fillAnswersToPage(getContextDocument(context), textAnswers);
   if (hasTextQuestions) {
     for (let retry = 0; retry < 2 && pageFilled === 0; retry += 1) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      pageFilled = fillAnswersToPage(getContextDocument(context), answers);
+      pageFilled = fillAnswersToPage(getContextDocument(context), textAnswers);
     }
     if (pageFilled === 0) {
-      installPageFillObserver(context, answers);
+      installPageFillObserver(context, textAnswers);
     }
   }
   unipusLog(context,
@@ -2196,7 +2205,7 @@ function installPageFillObserver(context, answers) {
   if (!MutationObserverCtor) return;
   try {
     pageFillObserver = new MutationObserverCtor(() => {
-      if (fillAnswersToPage(doc, answers) > 0) {
+      if (fillAnswersToPage(doc, textAnswers) > 0) {
         unipusLog(context, `u校园页面填答（观察者）：答案已填入输入框。`);
         stopPageFillObserver();
         // 延迟渲染的输入框填答完成后，同样调度自动提交（autoSubmit 开关内部判定）。

@@ -1,4 +1,7 @@
-// 真实浏览器实测服务器：仿真 u.unipus.cn 语音题页（加密题目下发 + 提交端点记录）
+// 真实浏览器实测服务器 v2：SPA 两页刷课循环仿真
+// 第 1 页：语音题（speaking，占位跳过）——验证停止策略与占位提交
+// 第 2 页：判断 + 填空——验证 DeepSeek 求解（mock）、选项点击、填空填答
+// 提交成功后平台展示"继续学习"按钮 → 翻页（SPA，不刷新）→ 下一页题目 XHR
 import https from 'node:https';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -7,9 +10,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 9445;
-const KEY = '20261019';
+const KEY = '20261020';
 
-// 与 unipus.js 同款加密：AES-128-ECB ZeroPadding，key = UTF8("1a2b3c4d" + k)
 function encryptUnipus(plainText, k) {
   const key = Buffer.from('1a2b3c4d' + k, 'utf8');
   let data = Buffer.from(plainText, 'utf8');
@@ -20,15 +22,28 @@ function encryptUnipus(plainText, k) {
   return 'unipus.' + Buffer.concat([cipher.update(data), cipher.final()]).toString('hex');
 }
 
-// 题目载荷：1 道语音题（speaking）+ 1 道判断题（验证完整链路 + DeepSeek mock）
-const inner1 = { replyType: 'speaking', contents: [{ text: '朗读以下句子' }], children: [], quesText: 'Read the sentence aloud: Hello world, welcome to unipus.' };
-const questionPayload = [
-  { id: 'q1', content: JSON.stringify(inner1), answer: JSON.stringify({ value: [] }), analysis: '', quesId: 'q1' },
-];
-const encrypted = encryptUnipus(JSON.stringify(questionPayload), KEY);
+// ---- 两页题目载荷 ----
+const innerVoice = { replyType: 'speaking', contents: [{ text: '朗读以下句子' }], children: [], quesText: 'Read the sentence aloud: Hello world, welcome to unipus.' };
+const innerJudge = { replyType: 'judge', contents: [{ text: '地球是圆的' }], children: [], quesText: '地球是圆的', options: [{ optionText: 'A. 对' }, { optionText: 'B. 错' }] };
+const innerFill = { replyType: 'fillblank', contents: [{ text: '1) The sky is ____1____.' }], children: [], quesText: 'The sky is ____1____.' };
 
-const submissions = [];
-const stopRequests = [];
+const PAGE_PAYLOADS = {
+  1: [
+    { id: 'p1-voice', content: JSON.stringify(innerVoice), answer: JSON.stringify({ value: [] }), analysis: '', quesId: 'p1-voice' },
+  ],
+  2: [
+    { id: 'p2-judge', content: JSON.stringify(innerJudge), answer: JSON.stringify({ value: [] }), analysis: '', quesId: 'p2-judge' },
+    { id: 'p2-fill', content: JSON.stringify(innerFill), answer: JSON.stringify({ value: [], children: [{ value: [] }] }), analysis: '', quesId: 'p2-fill' },
+  ],
+};
+const ENCRYPTED_PAGES = Object.fromEntries(
+  Object.entries(PAGE_PAYLOADS).map(([page, payload]) => [page, encryptUnipus(JSON.stringify(payload), KEY)])
+);
+
+// ---- 状态 ----
+const submissions = [];        // {page, body, injected:boolean}
+const deepseekCalls = [];      // 收到的求解请求
+let quizFetchCount = 0;        // 题目下发次数（第 1 页一次 + 翻页后一次）
 
 const page = fs.readFileSync(path.join(__dirname, 'page.html'), 'utf8');
 
@@ -37,16 +52,39 @@ const server = https.createServer({
   cert: fs.readFileSync(path.join(__dirname, 'cert.pem')),
 }, (req, res) => {
   const url = new URL(req.url, 'https://u.unipus.cn');
-  console.log(`[server] ${req.method} ${url.pathname}`);
+  const q = url.searchParams;
+
   if (url.pathname === '/' || url.pathname === '/index.html') {
-    const body = page.replace('__QUESTION_PAYLOAD__', encrypted).replace('__K__', KEY);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(body);
+    res.end(page.replace('__K__', KEY));
     return;
   }
+  // 题目下发：?page=N（页载荷）；无 page 参数默认第 1 页
   if (url.pathname === '/course/api/v3/content/quiz' && req.method === 'GET') {
+    quizFetchCount += 1;
+    const pageNo = q.get('page') === '2' ? 2 : 1;
+    console.log('[server] quiz page ' + pageNo + ' fetched (total ' + quizFetchCount + ')');
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ code: 0, content: encrypted, k: KEY }));
+    res.end(JSON.stringify({ code: 0, content: ENCRYPTED_PAGES[pageNo], k: KEY }));
+    return;
+  }
+  // DeepSeek mock：判断题固定回 B；填空题回 blue
+  if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      let reqBody = null;
+      try { reqBody = JSON.parse(raw); } catch { /* ignore */ }
+      const userText = reqBody && reqBody.messages && reqBody.messages.find((m) => m.role === 'user');
+      const isFill = userText && userText.content.includes('"qtype":2');
+      const answer = isFill ? 'blue' : 'B';
+      deepseekCalls.push({ at: Date.now(), qtype: isFill ? 2 : 3, answer });
+      console.log('[server] DeepSeek mock: qtype=' + (isFill ? 2 : 3) + ' -> ' + answer);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: answer } }],
+      }));
+    });
     return;
   }
   if (url.pathname === '/course/api/v3/newExploration/submit' && req.method === 'POST') {
@@ -55,17 +93,33 @@ const server = https.createServer({
     req.on('end', () => {
       let parsed = null;
       try { parsed = JSON.parse(raw); } catch { /* ignore */ }
-      submissions.push({ at: Date.now(), body: parsed, usedTime: parsed && parsed.usedTime });
-      console.log('[server] SUBMIT received: usedTime=' + (parsed && parsed.usedTime) +
-        ' answerLeaf=' + JSON.stringify(parsed && parsed.quesDatas && parsed.quesDatas[0] && parsed.quesDatas[0].answer).slice(0, 120));
+      const page = q.get('page') === '2' ? 2 : 1;
+      submissions.push({ at: Date.now(), page, body: parsed, usedTime: parsed && parsed.usedTime });
+      console.log('[server] SUBMIT page ' + page + ': usedTime=' + (parsed && parsed.usedTime) +
+        ' ques=' + (parsed && parsed.quesDatas ? parsed.quesDatas.length : '?') +
+        ' answers=' + JSON.stringify(parsed && parsed.quesDatas && parsed.quesDatas.map((x) => x.answer)).slice(0, 200));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ code: 0, msg: 'ok' }));
     });
+    return;
+  }
+  // 状态查询（driver 轮询/断言用）
+  if (url.pathname === '/__teststate' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ submissions: submissions.length, deepseekCalls: deepseekCalls.length, quizFetchCount }));
+    return;
+  }
+  // 重置状态（driver 开场调用，保证断言干净）
+  if (url.pathname === '/__testreset' && req.method === 'POST') {
+    submissions.length = 0; deepseekCalls.length = 0; quizFetchCount = 0;
+    console.log('[server] state reset');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{"ok":true}');
     return;
   }
   res.writeHead(404);
   res.end('not found');
 });
 
-server.listen(PORT, () => console.log('[server] listening on https://u.unipus.cn:' + PORT + ' (via --host-resolver-rules)'));
+server.listen(PORT, () => console.log('[server] listening on https://u.unipus.cn:' + PORT + ' (v2 two-page cycle)'));
 process.on('SIGINT', () => process.exit(0));

@@ -10,7 +10,7 @@ import { spawn, execSync } from 'node:child_process';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mode = process.argv[2] || 'deaf'; // deaf：停止点击被拒（复现卡点）；normal：普通
 const CDP_PORT = 9444;
-const PAGE_URL = 'https://u.unipus.cn:9445/?case=voice&deaf=' + (mode === 'deaf' ? '1' : '0');
+const PAGE_URL = 'https://u.unipus.cn:9445/?deaf=' + (mode === 'deaf' ? '1' : '0');
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const PROFILE = path.join(process.env.TEMP || __dirname, 'edge-voice-e2e-' + mode + '-' + Date.now());
 
@@ -130,36 +130,159 @@ async function main() {
   await cdp.send('Page.enable');
   await cdp.send('Runtime.evaluate', { expression: 'window.__consoleTail = []' });
   // 采集 console 的另一条路：写入 window 数组，供最后断言读取
+    // 预置扩展配置：DeepSeek API key（值任意，mock 不校验）——通过 SW target 写 storage
+  // 注意：unpacked 扩展在 headless 下可能于导航/生命周期事件中被重载，
+  // storage.local 会在重载时清空（观察到的现象），因此导航后再补写一次。
+  const presetStorage = async () => {
+    try {
+      const ts = await getJson('http://127.0.0.1:' + CDP_PORT + '/json/list');
+      const swt = ts.find((t) => (t.type === 'service_worker' || t.type === 'background_page') && /background\/service-worker\.js$/.test(t.url));
+      if (!swt) { log('preset: no SW target now'); return; }
+      const w = new WebSocket(swt.webSocketDebuggerUrl);
+      await new Promise((res, rej) => { w.onopen = res; w.onerror = rej; });
+      const pn = { n: 0 };
+      const snd = (method, params) => new Promise((resolve, reject) => {
+        const id = ++pn.n;
+        const onMsg = (ev) => { const m = JSON.parse(ev.data); if (m.id === id) { w.removeEventListener('message', onMsg); m.error ? reject(new Error(JSON.stringify(m.error))) : resolve(m.result); } };
+        w.addEventListener('message', onMsg);
+        w.send(JSON.stringify({ id, method, params: params || {} }));
+      });
+      await snd('Runtime.enable');
+      const rr = await snd('Runtime.evaluate', { expression: `
+        new Promise((done) => {
+          chrome.storage.local.set({ deepseekApiKey: 'test-key-for-mock', deepseekModel: 'deepseek-chat', autoAnswer: true, autoSubmit: true, deepseekTimeoutMs: 8000, deepseekApiBase: 'https://u.unipus.cn:9445/v1/chat/completions' },
+            () => done(chrome.runtime.lastError ? 'ERR:' + chrome.runtime.lastError.message : 'ok'));
+        })`, awaitPromise: true, returnByValue: true });
+      log('re-preset via SW: ' + rr.result.value);
+      w.close();
+    } catch (e) { log('re-preset failed: ' + e.message); }
+  };
+  try {
+    const swTarget = targets.find((t) => (t.type === 'service_worker' || t.type === 'background_page') &&
+        /background\/service-worker\.js$/.test(t.url));
+      if (swTarget) log('using SW target: ' + swTarget.url.slice(0, 90));
+      if (!swTarget) log('AVAILABLE targets: ' + JSON.stringify(targets.map((t) => t.type + '|' + t.url.slice(0, 80))));
+    if (swTarget) {
+      const swWs = new WebSocket(swTarget.webSocketDebuggerUrl);
+      await new Promise((res, rej) => { swWs.onopen = res; swWs.onerror = rej; });
+      const swId = { n: 0 };
+      const swSend = (method, params) => new Promise((resolve, reject) => {
+        const id = ++swId.n;
+        const onMsg = (ev) => { const m = JSON.parse(ev.data); if (m.id === id) { swWs.removeEventListener('message', onMsg); m.error ? reject(new Error(JSON.stringify(m.error))) : resolve(m.result); } };
+        swWs.addEventListener('message', onMsg);
+        swWs.send(JSON.stringify({ id, method, params: params || {} }));
+      });
+      await swSend('Runtime.enable');
+      const presetResult = await swSend('Runtime.evaluate', { expression: `
+        new Promise((done) => {
+          if (!chrome || !chrome.storage || !chrome.storage.local) { done('NO-STORAGE-API'); return; }
+          chrome.storage.local.set({
+            deepseekApiKey: 'test-key-for-mock',
+            deepseekModel: 'deepseek-chat',
+            autoAnswer: true,
+            autoSubmit: true,
+            deepseekTimeoutMs: 8000
+          }, () => {
+            const err = chrome.runtime.lastError;
+            done(err ? 'SET-ERROR: ' + err.message : 'preset-ok');
+          });
+        })`, awaitPromise: true, returnByValue: true });
+      log('preset evaluate result: ' + JSON.stringify(presetResult.result && presetResult.result.value));
+      const idResult = await swSend('Runtime.evaluate', { expression: 'chrome.runtime.id', returnByValue: true });
+      log('SW extension id: ' + idResult.result.value);
+      const readBack = await swSend('Runtime.evaluate', { expression: `
+        new Promise((done) => {
+          chrome.storage.local.get(['deepseekApiKey'], (v) => done(JSON.stringify(v && v.deepseekApiKey)));
+        })`, awaitPromise: true, returnByValue: true });
+      log('storage readback after set: ' + readBack.result.value);
+      // 保持 SW 连接（引用），预置后立即关闭也可能只是正常关闭
+      swWs.close();
+      log('extension storage preset via service worker (deepseekApiKey=test-key-for-mock)');
+    } else log('no service worker target found, storage preset skipped');
+  } catch (e) { log('storage preset failed (non-fatal): ' + e.message); }
+
   await cdp.send('Page.navigate', { url: PAGE_URL });
   await sleep(2500);
 
   // 5. 轮询页面状态（最多 60 秒）：等待 submitted=true
+  await presetStorage(); // 导航后再补写（防 unpacked 扩展重载清 storage）
   log('polling page state (mode=' + mode + ')…');
-  let submitted = false, stopOk = false, micClicks = 0, selected = null, stopCmdSent = false;
+  let submitted = false, stopOk = false, micClicks = 0, selected = null, stopCmdSent = false, rePresetDone = false;
   const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {
-    const r = await cdp.send('Runtime.evaluate', { expression: 'JSON.stringify({submitted:!!window.__submitted,stopOk:!!window.__stopOk,micClicks:window.__micClicks||0,selected:window.__selectedOption,recError:window.__recordError||null,st:(document.getElementById("st")||{}).textContent||"",rec:(document.getElementById("recState1")||{}).textContent||""})', returnByValue: true });
-    const s = JSON.parse(r.result.value);
-    submitted = s.submitted; stopOk = s.stopOk; micClicks = s.micClicks; selected = s.selected;
-    if (submitted) break;
+    const r = await cdp.send('Runtime.evaluate', { expression: 'JSON.stringify(window.__cycle || {})', returnByValue: true });
+    const s = JSON.parse(r.result.value || '{}');
+    submitted = (s.submitted || []).length; stopOk = !!s.stopOk; micClicks = s.micClicks || 0; selected = s.selectedOption;
+    if (submitted >= 2) break;
+    if ((s.pagesRendered || []).includes(2) && !s.selectedOption && !rePresetDone) {
+      rePresetDone = true;
+      await presetStorage();
+    }
     await sleep(1500);
   }
 
-  // 6. 收集扩展日志（页面 console 里 course-helper 相关行）与最终状态
-  const finalState = await cdp.send('Runtime.evaluate', { expression: 'JSON.stringify({st:(document.getElementById("st")||{}).textContent||"",rec:(document.getElementById("recState1")||{}).textContent||"",groupChildren:[...(window.__groupEl?window.__groupEl.children:[])].map(c=>c.id+":"+c.textContent)})', returnByValue: true });
+  // 6. 服务端状态 + 最终页面状态
+  let serverState = null;
+  try {
+    const resp = await fetch('https://u.unipus.cn:9445/__teststate', { agent: false, rejectUnauthorized: false }).catch(() => null);
+  } catch {}
+  // Node fetch 对自签证书：用 child curl 简化
+  const { execSync } = await import('node:child_process');
+  try {
+    serverState = JSON.parse(execSync('curl -sk https://127.0.0.1:9445/__teststate', { encoding: 'utf8' }));
+  } catch (e) { serverState = { submissions: -1, deepseekCalls: -1, quizFetchCount: -1 }; }
+  const finalState = await cdp.send('Runtime.evaluate', { expression: 'JSON.stringify({cycle:window.__cycle, st:(document.getElementById("st")||{}).textContent||"", pageTag:(document.getElementById("pageTag")||{}).textContent||"", fillVal:(document.getElementById("fill1")||{}).value||null})', returnByValue: true });
+  // 页面 MAIN world 看不到 chrome API；isolated world 才看得到。用 Runtime.evaluate 的 contextId 不易拿——跳过，
+  // 改从扩展 SW 侧看日志：SW console 也在 CDP（若连着）。此处打印 SW 目标列表用于诊断
+  try {
+    const targetsNow = await getJson('http://127.0.0.1:' + CDP_PORT + '/json/list');
+    log('targets at end: ' + JSON.stringify(targetsNow.map((t) => t.type + '|' + t.url.slice(0, 70))));
+  } catch (e) { log('targets list failed: ' + e.message); }
   const helperLogs = cdp.consoleLogs.filter((l) => l.includes('course-helper') || l.includes('[unipus]'));
+  // SW 处理请求后再次 readback（排查 storage 是否中途丢失）
+  try {
+    const targets2 = await getJson('http://127.0.0.1:' + CDP_PORT + '/json/list');
+    const sw2 = targets2.find((t) => (t.type === 'service_worker' || t.type === 'background_page') && /background\/service-worker\.js$/.test(t.url));
+    if (sw2) {
+      const ws2 = new WebSocket(sw2.webSocketDebuggerUrl);
+      await new Promise((res, rej) => { ws2.onopen = res; ws2.onerror = rej; });
+      const p2 = { n: 0 };
+      const send2 = (method, params) => new Promise((resolve, reject) => {
+        const id = ++p2.n;
+        const onMsg = (ev) => { const m = JSON.parse(ev.data); if (m.id === id) { ws2.removeEventListener('message', onMsg); m.error ? reject(new Error(JSON.stringify(m.error))) : resolve(m.result); } };
+        ws2.addEventListener('message', onMsg);
+        ws2.send(JSON.stringify({ id, method, params: params || {} }));
+      });
+      await send2('Runtime.enable');
+      const rb2 = await send2('Runtime.evaluate', { expression: `
+        new Promise((done) => {
+          chrome.storage.local.get(null, (v) => done(JSON.stringify(v)));
+        })`, awaitPromise: true, returnByValue: true });
+      log('storage full readback (late): ' + String(rb2.result.value).slice(0, 300));
+      ws2.close();
+    } else log('late readback: no SW target');
+  } catch (e) { log('late readback failed: ' + e.message); }
 
   // 7. 输出报告
-  console.log('\n===== 实测报告（mode=' + mode + '）=====');
+  console.log('\n===== 实测报告（mode=' + mode + '，两页循环）=====');
   console.log('页面最终状态:', finalState.result.value);
+  console.log('服务端状态:', JSON.stringify(serverState));
   console.log('--- 扩展 console 日志（course-helper 相关，共 ' + helperLogs.length + ' 条）---');
   for (const l of helperLogs) console.log('  ' + l.slice(0, 240));
   console.log('--- 关键断言 ---');
-  console.log((stopOk ? 'PASS' : 'FAIL') + ' 录音已停止（__stopOk）');
-  console.log((submitted ? 'PASS' : 'FAIL') + ' 页面提交成功（__submitted）');
-  console.log((micClicks >= 1 ? 'PASS' : 'FAIL') + ' 录音开始按钮被扩展点击（micClicks=' + micClicks + '）');
-  console.log((selected !== null ? 'PASS' : 'INFO') + ' 判断题选项（本场景为纯语音页，值为 ' + (selected || 'none') + '）');
-  const pass = stopOk && submitted && micClicks >= 1;
+  const cycle = (() => { try { return JSON.parse(finalState.result.value).cycle; } catch { return {}; } })();
+  console.log((serverState.submissions === 2 ? 'PASS' : 'FAIL') + ' 两次提交（page1 语音 + page2 判断/填空），服务器收到 ' + serverState.submissions);
+  console.log((cycle.stopOk ? 'PASS' : 'FAIL') + ' 语音题录音已停止（第 1 页）');
+  console.log((cycle.micClicks >= 1 ? 'PASS' : 'FAIL') + ' 录音开始按钮被扩展点击（micClicks=' + cycle.micClicks + '，停止被拒 ' + (cycle.stopRejected || 0) + ' 次）');
+  console.log((serverState.deepseekCalls >= 2 ? 'PASS' : 'FAIL') + ' DeepSeek mock 被调用（判断+填空，共 ' + serverState.deepseekCalls + ' 次）');
+  console.log((cycle.selectedOption === 'B. 错' ? 'PASS' : 'FAIL') + ' 判断题选中 mock 答案 B（实际：' + (cycle.selectedOption || 'none') + '）');
+  console.log((cycle.fillValue === 'blue' ? 'PASS' : 'FAIL') + ' 填空题填入 mock 答案 blue（实际：' + (cycle.fillValue || 'empty') + '）');
+  console.log((cycle.pagesRendered && cycle.pagesRendered.includes(2) ? 'PASS' : 'FAIL') + ' SPA 翻页到第 2 页（渲染历史：' + JSON.stringify(cycle.pagesRendered) + '）');
+  console.log((serverState.quizFetchCount === 2 ? 'PASS' : 'FAIL') + ' 题目 XHR 两次下发（第 1 页 + 翻页后），实际 ' + serverState.quizFetchCount);
+  const injectedOk = serverState.submissions === 2; // 提交本身成功（注入改写在 bridge 日志里看）
+  const pass = cycle.stopOk && cycle.micClicks >= 1 && serverState.submissions === 2 &&
+    serverState.deepseekCalls >= 2 && cycle.selectedOption === 'B. 错' && cycle.fillValue === 'blue' &&
+    cycle.pagesRendered && cycle.pagesRendered.includes(2);
   console.log('\n===== ' + (pass ? 'ALL-PASS ✓' : 'HAS-FAILURES ✗') + ' =====');
 
   ws.close();
@@ -168,4 +291,4 @@ async function main() {
   process.exit(pass ? 0 : 1);
 }
 
-main().catch((e) => { console.error('[driver] FATAL:', e); process.exit(2); });
+main().catch((e) => { console.error('[driver] FATAL:', e); try { edge.kill(); } catch {} try { server.kill(); } catch {} process.exit(2); });

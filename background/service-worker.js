@@ -1,6 +1,8 @@
 /* [SECTION:SERVICE_WORKER] 原生 MV3 后台消息路由：DeepSeek、学习通接口与持久缓存。 */
 
-const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
+const DEEPSEEK_URL_DEFAULT = 'https://api.deepseek.com/chat/completions';
+// 端点可经 storage.local.deepseekApiBase 覆盖（自建代理/测试 mock 用；默认官方直连不变）。
+// 值填 origin 或完整路径（如 https://api.deepseek.com 或 https://mock.local/v1/chat/completions）。
 const DEEPSEEK_SYSTEM_PROMPT = '你是答题助手，只输出答案，不要任何解释。单选题和判断题只输出选项字母（如 A）；多选题输出连续字母（如 ABD）；填空题多个空用 # 分隔；简答题直接输出答案文字。';
 const DEEPSEEK_DEFAULT_MODEL = 'deepseek-chat';
 const DEEPSEEK_DEFAULT_TEMPERATURE = 0.1;
@@ -139,6 +141,26 @@ async function readStorage(keys) {
   return chrome.storage.local.get(keys);
 }
 
+// 解析 DeepSeek 端点：storage.deepseekApiBase（origin 或完整 URL）→ 覆盖默认官方端点。
+// 仅接受 http(s) URL；补全默认 path；非法值回退默认（不抛错，不影响答题主流程）。
+async function resolveDeepSeekUrl(apiBase) {
+  if (typeof apiBase !== 'string' || !apiBase.trim()) {
+    return DEEPSEEK_URL_DEFAULT;
+  }
+  try {
+    const parsed = new URL(apiBase.trim());
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return DEEPSEEK_URL_DEFAULT;
+    }
+    if (!parsed.pathname || parsed.pathname === '/') {
+      return parsed.origin + '/chat/completions';
+    }
+    return parsed.origin + parsed.pathname;
+  } catch (_error) {
+    return DEEPSEEK_URL_DEFAULT;
+  }
+}
+
 function acquireDeepSeekSlot() {
   if (deepSeekActive < DEEPSEEK_MAX_CONCURRENCY) {
     deepSeekActive += 1;
@@ -182,7 +204,8 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 
 async function handleDeepSeek(payload) {
   const request = assertDeepSeekPayload(payload);
-  const stored = await readStorage(['deepseekApiKey', 'deepseekModel', 'deepseekTemperature', 'deepseekTimeoutMs']);
+  const stored = await readStorage(['deepseekApiKey', 'deepseekModel', 'deepseekTemperature', 'deepseekTimeoutMs', 'deepseekApiBase']);
+  const deepseekUrl = await resolveDeepSeekUrl(stored.deepseekApiBase);
   const apiKey = typeof stored.deepseekApiKey === 'string' ? stored.deepseekApiKey : '';
   if (!apiKey || apiKey === DEEPSEEK_KEY_PLACEHOLDER) {
     throw new RequestError('MISSING_API_KEY', 'DeepSeek API key is not configured', false);
@@ -194,7 +217,7 @@ async function handleDeepSeek(payload) {
   const timeoutMs = request.timeoutMs || (Number.isInteger(stored.deepseekTimeoutMs) ? stored.deepseekTimeoutMs : DEEPSEEK_DEFAULT_TIMEOUT_MS);
   const userContent = JSON.stringify({ qtype: request.qtype, stem: request.stem, options: request.options });
   return withDeepSeekSlot(async () => {
-    const response = await fetchWithTimeout(DEEPSEEK_URL, {
+    const response = await fetchWithTimeout(deepseekUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

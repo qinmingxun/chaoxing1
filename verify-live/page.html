@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>u校园语音题仿真页（真实 MediaRecorder + React 式节点替换）</title>
+<title>u校园刷课循环仿真页 v2（SPA 两页：语音页 → 判断+填空页）</title>
 <style>
   body { font-family: "Segoe UI", sans-serif; max-width: 720px; margin: 40px auto; }
   .record-button-group { display: flex; gap: 12px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; width: fit-content; }
@@ -10,149 +10,190 @@
   .record-button-group > div.rec { background: #ffecec; }
   .option-wrap { padding: 8px 14px; border: 1px solid #ddd; border-radius: 6px; width: fit-content; margin: 6px 0; cursor: pointer; }
   .option-wrap.sel { background: #e8f1ff; border-color: #4a90e2; }
+  .fill-input { padding: 6px 10px; border: 1px solid #bbb; border-radius: 4px; width: 200px; }
   #pc-foot { margin-top: 30px; padding: 12px; border-top: 1px solid #ccc; }
   #pc-foot a { color: #fff; background: #4a90e2; padding: 8px 24px; border-radius: 4px; cursor: pointer; text-decoration: none; }
+  #pc-foot a.continue { background: #0a0; }
   .status { margin: 12px 0; padding: 8px; background: #fafafa; border-left: 3px solid #4a90e2; }
   .ok { color: #0a0; } .err { color: #c00; }
+  .page-tag { display: inline-block; background: #333; color: #fff; padding: 2px 10px; border-radius: 10px; font-size: 13px; }
 </style>
 </head>
 <body>
-<h2>u校园语音题仿真页</h2>
+<h2>u校园刷课循环仿真 <span class="page-tag" id="pageTag">第 1 页</span></h2>
 <div class="status" id="st">等待启动…</div>
-<div id="q1">
-  <p><b>第 1 题（语音）：</b>Read the sentence aloud: Hello world, welcome to unipus.</p>
-  <div class="record-button-group" id="rg1">
-    <div id="placeholder1">·</div>
-    <div id="mic1">🎙 开始录音</div>
-  </div>
-  <p id="recState1">未录音</p>
-</div>
-<div id="q2">
-  <p><b>第 2 题（判断）：</b>地球是圆的</p>
-  <div class="option-wrap" id="optA">A. 对</div>
-  <div class="option-wrap" id="optB">B. 错</div>
-</div>
-<div id="pc-foot"><div><a id="submitBtn">提交</a></div></div>
+<div id="quizArea"></div>
+<div id="pc-foot"></div>
 <script>
 (() => {
-  // 平台行为仿真：XHR 拉取题目（响应被 MAIN bridge 拦截 → 触发扩展自动答题）
-  setTimeout(() => {
-  const xhr = new XMLHttpRequest();
-  xhr.open('GET', '/course/api/v3/content/quiz?lessonId=voice-e2e');
-  xhr.onload = () => { try { window.__quizFetched = JSON.parse(xhr.responseText).code === 0; } catch { window.__quizFetched = false; } };
-  xhr.onerror = () => { window.__quizFetched = false; };
-  xhr.send();
-  }, 2000);
-
+  // ---- 页面结构模板 ----
+  const TEMPLATES = {
+    1: () => `
+      <div id="main-content"><div class="layout-reply-container">
+      <p><b>第 1 题（语音）：</b>Read the sentence aloud: Hello world, welcome to unipus.</p>
+      <div class="record-button-group" id="rg1">
+        <div id="placeholder1">·</div>
+        <div id="mic1">🎙 开始录音</div>
+      </div>
+      <p id="recState1">未录音</p></div></div>`,
+    2: () => `
+      <div id="main-content"><div class="layout-reply-container">
+      <p><b>第 1 题（判断）：</b>地球是圆的</p>
+      <div class="option-wrap" id="optWrapA"><label><input type="radio" name="judge" value="A"> A. 对</label></div>
+      <div class="option-wrap" id="optWrapB"><label><input type="radio" name="judge" value="B"> B. 错</label></div>
+      <p><b>第 2 题（填空）：</b>The sky is <span class="item"><input class="fill-input" type="text" id="fill1"></span></p></div></div>`,
+  };
   const st = (msg, cls) => { const el = document.getElementById('st'); el.textContent = msg; el.className = 'status ' + (cls || ''); };
-  // ---- React 式录音组件：真实 MediaRecorder + 节点替换（复现停止失效）----
-  const rg = document.getElementById('rg1');
-  const recState = document.getElementById('recState1');
-  let recorder = null, recording = false, micClickCount = 0, stopHandled = 0;
-  // deaf 模式开关：?deaf=1 时停止按钮拒绝一切合成点击（isTrusted=false）
   const deaf = new URLSearchParams(location.search).get('deaf') === '1';
-  const isSynthetic = (e) => deaf && e.isTrusted === false;
+  window.__cycle = { page: 0, submitted: [], stopOk: false, micClicks: 0, stopRejected: 0, selectedOption: null, fillValue: null, pagesRendered: [], recordErrors: [] };
 
-  function renderGroup() {
-    // React 重渲染：整组重建（旧节点全部失效——复现实测卡点的根因）
-    const replacement = rg.cloneNode(false);
-    replacement.innerHTML = '';
-    const ph = document.createElement('div');
-    ph.id = 'placeholder1'; ph.textContent = '·';
-    const btn = document.createElement('div');
-    btn.id = recording ? 'stop1' : 'mic1';
-    btn.className = recording ? 'rec' : '';
-    btn.textContent = recording ? '⏹ 停止' : '🎙 开始录音';
-    btn.addEventListener('click', onBtnClick);
-    btn.addEventListener('mousedown', onBtnPointer); // 指针监听（覆盖升级点击方式）
-    replacement.appendChild(ph);
-    replacement.appendChild(btn);
-    rg.replaceWith(replacement);
-    window.__groupEl = replacement; // 供 CDP 断言
-    return replacement;
+  // ---- 题目 XHR（bridge 拦截入口）：page 参数决定载荷 ----
+  function fetchQuiz(pageNo) {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', '/course/api/v3/content/quiz?page=' + pageNo + '&t=' + Date.now());
+    xhr.onload = () => { try { window.__quizFetched = JSON.parse(xhr.responseText).code === 0; } catch { window.__quizFetched = false; } };
+    xhr.send();
   }
-  function onBtnPointer(e) { /* 只统计，行为在 click */ }
-  async function onBtnClick(e) {
-    if (isSynthetic(e) && recording) {
-      // deaf 模式：录音中拒绝合成点击（复现"录了停不下来"）
-      recState.textContent = '录音中…（停止点击被拒 isTrusted=' + e.isTrusted + '，次数 ' + (++stopHandled) + '）';
-      recState.className = 'err';
-      return;
-    }
-    if (!recording) {
-      micClickCount += 1;
-      window.__micClicks = micClickCount;
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        recorder = new MediaRecorder(stream);
-        // onstop 构造时挂（与真实平台一致）：无论停止来源（点击/bridge 强制），
-        // onstop 触发即 UI 进入"已录音"状态——这就是平台接受提交的前提。
-        recorder.onstop = () => {
-          recording = false;
-          window.__stoppedAt = Date.now();
-          window.__stopOk = true;
-          recState.textContent = '已录音 ✓（' + (window.__stopSource || '未知来源') + '，' + Math.round((window.__stoppedAt - window.__recStartAt) / 1000) + 's）';
-          recState.className = 'ok';
-          renderGroup();
-        };
-        recorder.start();
-        recording = true;
-        recState.textContent = '录音中…（MediaRecorder 已启动，' + (deaf ? 'deaf 模式' : '普通模式') + '）';
-        recState.className = '';
-      } catch (err) {
-        recState.textContent = 'getUserMedia/Recorder 失败: ' + err.message;
-        recState.className = 'err';
-        window.__recordError = String(err && err.message || err);
-        return;
-      }
-    } else {
-      // 真实停止：MediaRecorder.stop() → onstop（构造时已挂）→ 前端进入"已录音"
-      window.__stopSource = '按钮点击';
-      try { recorder.stop(); } catch (err) { /* already stopped */ }
-    }
-    renderGroup();
-  }
-  window.__recStartAt = 0;
-  window.__stopSource = 'bridge 强制停止';
-  const origStart = MediaRecorder.prototype.start;
-  MediaRecorder.prototype.start = function () { window.__recStartAt = Date.now(); return origStart.apply(this, arguments); };
-  // 初始渲染
-  rg.querySelector('#mic1').addEventListener('click', onBtnClick);
-  rg.querySelector('#mic1').addEventListener('mousedown', onBtnPointer);
-  window.__groupEl = rg;
 
-  // ---- 判断题（选项点击 + DeepSeek mock 校验）----
-  let selected = null;
-  window.__selectedOption = null;
-  for (const id of ['optA', 'optB']) {
-    document.getElementById(id).addEventListener('click', function () {
-      document.getElementById('optA').classList.remove('sel');
-      document.getElementById('optB').classList.remove('sel');
-      this.classList.add('sel');
-      selected = this.textContent; window.__selectedOption = selected;
+  // ---- SPA 渲染（不刷新，整区重建——复现平台 React 重渲染）----
+  function renderPage(pageNo) {
+    window.__cycle.page = pageNo;
+    window.__cycle.pagesRendered.push(pageNo);
+    document.getElementById('pageTag').textContent = '第 ' + pageNo + ' 页';
+    const area = document.getElementById('quizArea');
+    const foot = document.getElementById('pc-foot');
+    area.innerHTML = TEMPLATES[pageNo]();
+    foot.innerHTML = '<div><a id="submitBtn">提交</a></div>';
+    if (pageNo === 1) wireVoicePage();
+    if (pageNo === 2) wireQuizPage();
+    st('第 ' + pageNo + ' 页已渲染' + (deaf && pageNo === 1 ? '（deaf 模式：停止点击被拒）' : ''));
+  }
+  function showContinue() {
+    const foot = document.getElementById('pc-foot');
+    foot.innerHTML = '<div><a id="continueBtn" class="continue">继续学习</a></div>';
+    document.getElementById('continueBtn').addEventListener('click', () => {
+      const next = window.__cycle.page + 1;
+      if (TEMPLATES[next]) { renderPage(next); fetchQuiz(next); }
+      else st('已是最后一页（课程结束）', 'ok');
     });
   }
-  // ---- 提交：语音题必须已录音，否则前端校验拦截（复现平台行为）----
-  document.getElementById('submitBtn').addEventListener('click', async () => {
-    if (!window.__stopOk) { st('提交被拦截：语音题未完成录音', 'err'); return; }
-    const payload = {
-      quesDatas: [
-        { id: 'q1', answer: JSON.stringify({ value: [''] }) },
-      ],
-      usedTime: 88,
-    };
-    try {
-      const resp = await fetch('/course/api/v3/newExploration/submit', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+
+  // ---- 第 1 页：语音题（真实 MediaRecorder + React 式整组重建）----
+  let recorder = null, recording = false;
+  const isSynthetic = (e) => deaf && e.isTrusted === false;
+  function wireVoicePage() {
+    let rg = document.getElementById('rg1');
+    const recState = document.getElementById('recState1');
+    function renderGroup() {
+      const replacement = rg.cloneNode(false);
+      replacement.innerHTML = '';
+      const ph = document.createElement('div');
+      ph.id = 'placeholder1'; ph.textContent = '·';
+      const btn = document.createElement('div');
+      btn.id = recording ? 'stop1' : 'mic1';
+      btn.className = recording ? 'rec' : '';
+      btn.textContent = recording ? '⏹ 停止' : '🎙 开始录音';
+      btn.addEventListener('click', onBtnClick);
+      replacement.appendChild(ph);
+      replacement.appendChild(btn);
+      rg.replaceWith(replacement);
+      rg = replacement;
+      window.__groupEl = replacement;
+    }
+    async function onBtnClick(e) {
+      if (isSynthetic(e) && recording) {
+        window.__cycle.stopRejected += 1;
+        recState.textContent = '录音中…（停止点击被拒 isTrusted=false，第 ' + window.__cycle.stopRejected + ' 次）';
+        recState.className = 'err';
+        return;
+      }
+      if (!recording) {
+        window.__cycle.micClicks += 1;
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          recorder = new MediaRecorder(stream);
+          recorder.onstop = () => {
+            recording = false;
+            window.__cycle.stopOk = true;
+            recState.textContent = '已录音 ✓（' + (window.__stopSource || '未知来源') + '）';
+            recState.className = 'ok';
+            renderGroup();
+          };
+          recorder.start();
+          recording = true;
+          recState.textContent = '录音中…';
+          recState.className = '';
+        } catch (err) {
+          window.__cycle.recordErrors.push(String(err && err.message || err));
+          recState.textContent = '录音失败: ' + err.message;
+          recState.className = 'err';
+          return;
+        }
+      } else {
+        window.__stopSource = '按钮点击';
+        try { recorder.stop(); } catch (err) { /* already stopped */ }
+      }
+      renderGroup();
+    }
+    window.__stopSource = 'bridge 强制停止';
+    rg.querySelector('#mic1').addEventListener('click', onBtnClick);
+    window.__groupEl = rg;
+    wireSubmit(1, () => window.__cycle.stopOk, () => ({ quesDatas: [{ id: 'p1-voice', answer: JSON.stringify({ value: [''] }) }] }));
+  }
+
+  // ---- 第 2 页：判断（点击）+ 填空（value setter + input 事件）----
+  function wireQuizPage() {
+    window.__selectedOption = null;
+    const radios = [document.querySelector('#optWrapA input'), document.querySelector('#optWrapB input')];
+    for (const radio of radios) {
+      radio.addEventListener('change', function () {
+        if (!this.checked) return;
+        document.getElementById('optWrapA').classList.toggle('sel', this === radios[0]);
+        document.getElementById('optWrapB').classList.toggle('sel', this === radios[1]);
+        window.__cycle.selectedOption = this === radios[1] ? 'B. 错' : 'A. 对';
       });
-      const j = await resp.json();
-      if (j.code === 0) { st('提交成功 ✓（服务器已记录，usedTime=' + j.usedTimeHint + '）', 'ok'); window.__submitted = true; }
-      else st('提交失败: ' + JSON.stringify(j), 'err');
-    } catch (err) { st('提交请求失败: ' + err.message, 'err'); }
-  });
-  st('页面就绪：语音题 1 道 + 判断题 1 道' + (deaf ? '（deaf 模式：停止点击被拒）' : ''));
-  window.__ready = true;
+      // 合成 click 不触发 change 的环境兜底：click 后手动同步
+      radio.addEventListener('click', function () {
+        this.checked = true;
+        this.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    }
+    const fill = document.getElementById('fill1');
+    window.__cycle.fillValue = null;
+    fill.addEventListener('input', () => { window.__cycle.fillValue = fill.value; });
+    wireSubmit(2, () => true, () => ({
+      quesDatas: [
+        { id: 'p2-judge', answer: JSON.stringify({ value: [''] }) },
+        { id: 'p2-fill', answer: JSON.stringify({ value: [''], children: [{ value: [''] }] }) },
+      ],
+    }));
+  }
+
+  // ---- 提交（page 参数区分载荷；语音页未录音则拦截）----
+  function wireSubmit(pageNo, gate, makePayload) {
+    document.getElementById('submitBtn').addEventListener('click', async () => {
+      if (!gate()) { st('提交被拦截：语音题未完成录音', 'err'); return; }
+      try {
+        const resp = await fetch('/course/api/v3/newExploration/submit?page=' + pageNo, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(makePayload()),
+        });
+        const j = await resp.json();
+        if (j.code === 0) {
+          window.__cycle.submitted.push(pageNo);
+          st('第 ' + pageNo + ' 页提交成功 ✓', 'ok');
+          showContinue();
+        } else st('提交失败: ' + JSON.stringify(j), 'err');
+      } catch (err) { st('提交请求失败: ' + err.message, 'err'); }
+    });
+  }
+
+  // ---- 启动：2 秒后拉第 1 页题目（监听器先就绪）----
+  setTimeout(() => {
+    renderPage(1);
+    fetchQuiz(1);
+    window.__ready = true;
+  }, 2000);
 })();
 </script>
 </body>
