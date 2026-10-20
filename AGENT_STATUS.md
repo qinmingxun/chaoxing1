@@ -198,3 +198,11 @@
 - 诊断升级（72bf0b4）：快照新增【录音按钮细节】——第一个 wrap 的完整 innerHTML（300 字符）+ 全部子元素 tag/class/尺寸；开始点击后新增【点击回执】（目标 describeElement）与【点击后 400ms 按钮态采样】（class/innerHTML 变化）——下次重测日志可直接看出平台录音入口的真实结构与点击是否引起状态切换。
 - "下一题"纯前端翻页识别：提交点击后 8 秒无 /submit 请求时，检查按钮组消失/pathname 变化——语音题"下一题"可能不发提交请求（纯前端翻页），避免误报"校验拦截"。
 - 回归 3 项全绿；已推送。
+
+## AGENT 34 页脚按钮点击方式升级（2026-10-20，用户提供 selector）
+
+- 用户确认"下一题"按钮 selector 为 #pc-foot > div > a（与 findSubmitButton/findFootLinkByText 的首选 selector 一致，定位无问题）。
+- 升级：页脚按钮（提交/下一题/继续学习）点击统一改为指针事件序列 clickWithPointerSequence（pointerdown→mousedown→pointerup→mouseup→click，冒泡+composed，坐标元素中心），覆盖只监听 pointer/mouse 的组件；失败回退原生 click。
+- 新增 capturePageFeedback：点击后 1.2 秒扫描平台提示弹窗（.ant-message-notice-content/.ant-modal-body/[role=alert]/toast/tip 等）并日志输出——若为"请先录音/录音不完整"类前端校验提示，下次重测日志直接可见拦截原因。
+- 回归 4 项全绿；提交 62e4817 已推送。
+- 待重测确认：页脚按钮指针序列点击是否触发翻页、平台提示文本是什么（决定录音为何未被认可）。
