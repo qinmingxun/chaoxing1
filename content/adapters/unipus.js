@@ -2258,7 +2258,18 @@ const VOICE_RECORD_DURATION_MS = 3000; // 录音窗口时长
 const VOICE_RECORD_GROUP_SELECTOR = ".record-button-group";
 // 真实结构（2026-10-20 快照）：录音按钮为 group 内 .record-button-wrap；
 // .question-audio（audio-origin 原音 / audio-replay 回放）是音频播放器，不是按钮。
-const VOICE_RECORD_BUTTON_SELECTOR = ".record-button-group .record-button-wrap";
+// 真实结构（2026-10-20 CDP 实测 ucontent.unipus.cn 实证）：
+//   .record-button-group × 7（每题一组）
+//   ├── .record-button-wrap 24x24 → .question-audio（播放原音 audio-origin / 回放 audio-replay）
+//   └── .record-button-wrap 32x32 → .ucomp-recorder > span.record-icon.button-record  ← 真录音按钮
+// 注意：.record-button-wrap 共 21 个（14 播放器 + 7 录音），必须按【内容】区分，
+// 不能按序号——这正是此前"点了没反应"的根因（点到播放器）。
+// 录音按钮是【开关式】：点第 1 次开始（MediaRecorder 构造）、点第 2 次停止
+// （MediaRecorder.stop），且 UI class 不变（始终 button-record），因此不能用
+// "class/文本变化"判断录音态，只能用 MediaRecorder 生命周期观测。
+const VOICE_RECORD_BUTTON_SELECTOR = ".ucomp-recorder .button-record";
+// 兼容旧结构/兜底：仅含 ucomp-recorder 的 wrap（排除播放器）
+const VOICE_RECORDER_WRAP_SELECTOR = ".record-button-wrap .ucomp-recorder";
 const VOICE_STOP_VERIFY_DELAY_MS = 600; // 停止点击后的验证等待（React 状态切换）
 
 // 组内"停止"目标（录音态）：取【最深】命中——React 录音组件的原生监听常绑在
@@ -2389,6 +2400,10 @@ function handleVoiceRecordingStatePayload(payload) {
   if (data.stopRequested === true || data.recording === false) {
     voiceRecordingStoppedSeen = true;
   }
+  // 同步录音态（供 detectRecordingActive 判定平台是否已自动开录）
+  if (typeof handleBridgeRecordingState === "function") {
+    handleBridgeRecordingState(data);
+  }
 }
 
 function installVoiceRecordingStateListener() {
@@ -2462,20 +2477,29 @@ function deepestClickTarget(element) {
   return deepest || element;
 }
 
+// 录音按钮收集（2026-10-20 CDP 实测真实结构）：
+//   主路径：.ucomp-recorder .button-record —— 唯一可靠的录音按钮标识。
+//   fallback：仅含 .ucomp-recorder 的 wrap（结构微调时的兜底）。
+// 绝不再按 .record-button-wrap 序号取——21 个 wrap 里 14 个是播放器（实测踩坑）。
+// 点击目标取 .button-record 自身（实测有效）：它在 32x32 的可点击区域内。
 function collectRecordButtons(doc) {
   const buttons = [];
   if (!doc) return buttons;
   const seen = new Set();
-  // 真实结构（2026-10-20 快照）：录音按钮为 group 内 .record-button-wrap（child[0]）；
-  // child[1] 是 .question-audio 音频播放器（audio-origin 原音 / audio-replay 回放）——
-  // 旧 nth-child(2) 会点到播放器（点击无效的次要原因）。最深后代点击经冒泡命中监听。
-  for (const wrap of safeQueryAll(doc, VOICE_RECORD_BUTTON_SELECTOR)) {
-    if (seen.has(wrap)) continue;
-    seen.add(wrap);
-    buttons.push(deepestClickTarget(wrap));
+  for (const icon of safeQueryAll(doc, VOICE_RECORD_BUTTON_SELECTOR)) {
+    if (seen.has(icon)) continue;
+    seen.add(icon);
+    buttons.push(icon); // 直接点 .button-record（实测可触发 MediaRecorder 构造）
   }
   if (buttons.length) return buttons;
-  // 旧结构 fallback（2026-10-18 实测：nth-child(2) 为麦克风）。
+  // fallback：ucomp-recorder 容器（结构变化时仍能点到）
+  for (const recorder of safeQueryAll(doc, VOICE_RECORDER_WRAP_SELECTOR)) {
+    if (seen.has(recorder)) continue;
+    seen.add(recorder);
+    buttons.push(recorder);
+  }
+  if (buttons.length) return buttons;
+  // 最后兜底：旧结构（.record-button-group > 第 2 个子元素），仅当页面无 ucomp-recorder
   for (const group of safeQueryAll(doc, VOICE_RECORD_GROUP_SELECTOR)) {
     let children = [];
     try {
@@ -2551,17 +2575,24 @@ function snapshotRecordingDom(context) {
 //      内部行为一致，触发 onstop 回调），回执经 ucampus-recording-state 验证。
 async function tryStopRecording(context, index) {
   const doc = getContextDocument(context);
-  // 策略 1：组内同位置按钮（录音态）。点击目标取组内"停止"文本最深命中；
-  // 无命中（停止态未渲染文本）时退回同位置 wrapper 的最深子元素。
+  // 策略 1（首选，2026-10-20 CDP 实测有效）：平台录音按钮是【开关式】——
+  // 同一个 .ucomp-recorder .button-record 点第 1 次开始录音（MediaRecorder 构造）、
+  // 点第 2 次停止（MediaRecorder.stop），且 UI class 始终不变（button-record）。
+  // 因此停止 = 实时重新查询同一按钮并再点一次（不能用文本/class 判断录音态）。
   const buttons = collectRecordButtons(doc);
-  let stopTarget = null;
-  const group = doc ? safeQuery(doc, VOICE_RECORD_GROUP_SELECTOR) : null;
-  if (group) stopTarget = findStopTextTarget(group);
-  if (!stopTarget && index < buttons.length) stopTarget = buttons[index];
-  if (stopTarget) {
-    clickRecordTarget(context, stopTarget);
+  if (index < buttons.length) {
+    clickRecordTarget(context, buttons[index]);
+    if (await verifyStopOutcome(context)) return "dom-toggle";
   }
-  if (await verifyStopOutcome(context)) return "dom";
+  // 策略 1b：组内"停止"文本命中（结构变化时的兜底；实测当前平台无此文案）
+  const group = doc ? safeQuery(doc, VOICE_RECORD_GROUP_SELECTOR) : null;
+  if (group) {
+    const stopTextTarget = findStopTextTarget(group);
+    if (stopTextTarget) {
+      clickRecordTarget(context, stopTextTarget);
+      if (await verifyStopOutcome(context)) return "dom";
+    }
+  }
 
   // 策略 2：全页扫描录音控件（文本/伪元素/class/id/aria/title 含停止语义）——
   // 真实停止按钮可能不在 .record-button-group 内（2026-10-20 实证：平台自动录音，
@@ -2715,28 +2746,32 @@ function dumpClickableElements(context) {
     `u校园语音题：全页可点击元素 dump（${uniq.length} 个，小尺寸优先）——` + (uniq.join(" | ") || "无"));
 }
 
-// 录音状态判定：平台提示"正在录音中"或存在录音态控件 → true。
-// 用于决定"是否需要点停止"（平台自动开录时不需要点开始）。
+// 录音状态判定（2026-10-20 CDP 实测修正）：
+// 平台录音按钮是开关式且 **UI class 完全不变**（始终 .button-record），
+// 因此不能靠 class/文本判断录音态。可靠信号来自 MAIN bridge 的 MediaRecorder 观测：
+// 收到 ucampus-recording-state {recording:true} 即表示平台已构造 recorder（正在录音）。
+// 这里用模块内缓存的状态；未收到回执时保守返回 false（走"点开始→等待→再点停止"路径）。
+let bridgeRecordingActive = false;
+function handleBridgeRecordingState(payload) {
+  const data = asObject(payload);
+  if (!data) return;
+  if (data.stopRequested === true || data.recording === false) {
+    bridgeRecordingActive = false;
+  } else if (data.recording === true) {
+    bridgeRecordingActive = true;
+  }
+}
 function detectRecordingActive(context) {
-  const doc = getContextDocument(context);
+  void context;
+  if (bridgeRecordingActive) return true;
+  // 兜底：页面出现明确的"正在录音中"提示（部分场景平台会弹）
+  const doc = getContextDocument(activeContext);
   if (!doc) return false;
-  // 1) 平台提示弹窗含"正在录音"
   for (const selector of [".ant-message-notice-content", '[class*="toast" i]', '[role="alert"]']) {
     for (const element of safeQueryAll(doc, selector)) {
       if (!isElementVisible(element)) continue;
-      if (/正在录音|录音中/.test(asString(element.textContent))) return true;
+      if (/正在录音中|录音中/.test(asString(element.textContent))) return true;
     }
-  }
-  // 2) 录音态控件（class 含 recording/stop-record 等）
-  for (const element of safeQueryAll(doc, "button, [role=button], a, div, span, i")) {
-    let haystack = "";
-    try {
-      haystack = asString(element.className) + " " + asString(element.id) + " " +
-        asString(element.getAttribute && element.getAttribute("aria-label"));
-    } catch (_error) { continue; }
-    if (!/(recording|stop-?record|record-?ing|录音中|停止录音)/i.test(haystack)) continue;
-    if (!isElementVisible(element)) continue;
-    return true;
   }
   return false;
 }
@@ -2744,7 +2779,7 @@ function detectRecordingActive(context) {
 async function simulateVoiceRecordings(context) {
   const doc = getContextDocument(context);
   // 版本标记（诊断用：一眼确认跑的是哪版代码，避免"改了但跑旧版"）
-  unipusLog(context, "u校园语音题：模块版本 v2026-10-20.4（自动录音探测+控件dump）");
+  unipusLog(context, "u校园语音题：模块版本 v2026-10-20.7（ucomp-recorder 录音按钮 + 开关式停止）");
   // 先探测全页录音控件（输出真实结构，供下次精确定位）
   const probe = probeRecordControls(context);
   if (probe.controls.length) {

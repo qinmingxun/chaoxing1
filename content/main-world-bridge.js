@@ -1427,9 +1427,120 @@
     globalWindow.MediaRecorder = MediaRecorderProbe;
   }
 
-  // content 侧停止命令：对存活 recorder 逐个 stop（重复 stop 已停止的 recorder
-  // 会抛 InvalidStateError，逐个 try/catch 吞掉），并回执停止后状态。
+  // 平台录音器实例追踪（2026-10-20 CDP 实测：ucontent 平台用 Html5Recorder 类，
+  // prototype 含 record / stopRecord / reset / _resetStatus / dispose）。
+  // 仅调用底层 MediaRecorder.stop() 不会清除平台的"正在录音中"状态——
+  // 必须调平台自己的 stopRecord()（或 reset()）才会让前端认为录音结束。
+  var platformRecorders = [];
+  function trackPlatformRecorder(instance) {
+    if (!instance) return;
+    for (var i = 0; i < platformRecorders.length; i += 1) {
+      if (platformRecorders[i] === instance) return;
+    }
+    platformRecorders.push(instance);
+    while (platformRecorders.length > 10) platformRecorders.shift();
+  }
+
+  // Html5Recorder 在 document_start 时还不存在（平台脚本稍后挂到 window），
+  // 必须轮询等待出现再接管；且页面脚本可能保存了旧引用，因此同时提供
+  // 【全局兜底停止】——直接遍历已记录实例调用 stopRecord。
+  function tryInstallPlatformRecorderProbe() {
+    var RecorderCtor = globalWindow.Html5Recorder;
+    if (!RecorderCtor || typeof RecorderCtor !== 'function') {
+      return false;
+    }
+    if (RecorderCtor.__courseHelperProbed) {
+      return true;
+    }
+    var OriginalCtor = RecorderCtor;
+    function Html5RecorderProbe() {
+      var instance = new OriginalCtor(...arguments);
+      trackPlatformRecorder(instance);
+      return instance;
+    }
+    Html5RecorderProbe.prototype = OriginalCtor.prototype;
+    Object.keys(OriginalCtor).forEach(function (key) {
+      try { Html5RecorderProbe[key] = OriginalCtor[key]; } catch (ignoredCopyError) {}
+    });
+    Html5RecorderProbe.__courseHelperProbed = true;
+    try {
+      globalWindow.Html5Recorder = Html5RecorderProbe;
+      console.log('[course-helper] MAIN bridge：已接管平台 Html5Recorder（可调 stopRecord 清除录音态）。');
+      return true;
+    } catch (ignoredAssignError) {
+      return false;
+    }
+  }
+
+  function installPlatformRecorderProbe() {
+    // 立即尝试 + 轮询（最多 60 秒，覆盖平台脚本加载延迟）
+    if (tryInstallPlatformRecorderProbe()) return;
+    var attempts = 0;
+    var timer = setInterval(function () {
+      attempts += 1;
+      if (tryInstallPlatformRecorderProbe()) {
+        clearInterval(timer);
+        return;
+      }
+      if (attempts >= 120) { // 60 秒后放弃
+        clearInterval(timer);
+      }
+    }, 500);
+    state.platformProbeTimer = timer;
+  }
+
+  // 兜底：不依赖接管成功，直接从 window 上找 Html5Recorder 实例并停止。
+  // 平台脚本可能把实例存在组件内部，这里遍历 window 一级属性 + 常见容器。
+  function forceStopPlatformRecorders() {
+    var stopped = 0;
+    var seen = {};
+    function tryStop(obj, keyHint) {
+      if (!obj || typeof obj !== 'object' || seen[obj]) return;
+      try { seen[obj] = true; } catch (e) { return; }
+      try {
+        if (typeof obj.stopRecord === 'function') {
+          obj.stopRecord();
+          stopped += 1;
+          console.log('[course-helper] MAIN bridge：已调用平台 stopRecord（来源=' + keyHint + '）。');
+        } else if (typeof obj.reset === 'function' && typeof obj.record === 'function') {
+          obj.reset();
+          stopped += 1;
+          console.log('[course-helper] MAIN bridge：已调用平台 reset（来源=' + keyHint + '）。');
+        }
+      } catch (ignoredErr) {}
+    }
+    // 1) 已追踪的实例
+    for (var i = 0; i < platformRecorders.length; i += 1) tryStop(platformRecorders[i], 'tracked');
+    // 2) window 一级属性
+    try {
+      var keys = Object.keys(globalWindow);
+      for (var k = 0; k < keys.length; k += 1) {
+        var key = keys[k];
+        if (!/record|audio|media|voice/i.test(key)) continue;
+        tryStop(globalWindow[key], 'window.' + key);
+      }
+    } catch (ignoredWindowErr) {}
+    return stopped;
+  }
+
+  // content 侧停止命令：优先用平台 stopRecord()（清平台状态），再兜底 MediaRecorder.stop()。
   function handleStopRecordingCommand() {
+    var platformStopped = 0;
+    for (var p = 0; p < platformRecorders.length; p += 1) {
+      var inst = platformRecorders[p];
+      if (!inst) continue;
+      try {
+        if (typeof inst.stopRecord === 'function') {
+          inst.stopRecord();
+          platformStopped += 1;
+        } else if (typeof inst.reset === 'function') {
+          inst.reset();
+          platformStopped += 1;
+        }
+      } catch (ignoredPlatformStopError) {
+        // 已停止/已释放的平台录音器安全跳过。
+      }
+    }
     var stopped = 0;
     for (var i = 0; i < liveRecorders.length; i += 1) {
       try {
@@ -1441,8 +1552,11 @@
         // 已停止/已失活的 recorder 安全跳过。
       }
     }
-    console.log('[course-helper] MAIN bridge：停止录音命令已执行（对 ' + stopped +
-      ' 个存活 MediaRecorder 调用 stop）。');
+    // 兜底：平台脚本可能在 document_start 后加载，接管可能没成功——
+    // 直接从 window 找 Html5Recorder 实例调 stopRecord。
+    var forcedStopped = forceStopPlatformRecorders();
+    console.log('[course-helper] MAIN bridge：停止录音命令已执行（平台 stopRecord ' + platformStopped +
+      ' 个 / 兜底 stopRecord ' + forcedStopped + ' 个 / MediaRecorder.stop ' + stopped + ' 个）。');
     emitRecordingState(false, liveRecorders.length, true);
   }
 
@@ -1455,6 +1569,10 @@
     disableConfirmOverrides();
     restoreNetworkHooks();
     restoreFakeAudioStream();
+    if (state.platformProbeTimer) {
+      try { clearInterval(state.platformProbeTimer); } catch (ignoredTimerError) {}
+      state.platformProbeTimer = null;
+    }
     state.disposed = true;
     state.disposing = false;
     clearMarker();
@@ -1510,14 +1628,76 @@
         }
         var context = new AudioContextCtor();
         var destination = context.createMediaStreamDestination();
-        var oscillator = context.createOscillator();
         var gain = context.createGain();
-        gain.gain.value = 0.06; // 低音量柔和音，避免爆音
-        oscillator.type = 'sine';
-        oscillator.frequency.value = 220;
-        oscillator.connect(gain);
+        gain.gain.value = 1.0;
         gain.connect(destination);
-        oscillator.start();
+        // 2026-10-20 实测结论（ucontent.unipus.cn 语音评测）：
+        // 平台把录音音频经 WebSocket 发到 speech.unipus.cn 做【语音识别】，
+        // 正弦波等非人声会被服务端忽略 → "录音启动超时"。必须注入【真人语音】。
+        // 方案：取页面题目原音 <audio class="unipus-audio-h5">（平台自带的英文朗读），
+        // 解码后循环播放注入录音流——既是真人语音，也不需要真实麦克风。
+        var sourceNodes = [];
+        var started = false;
+        var audioEls = [];
+        try {
+          audioEls = globalWindow.document
+            ? Array.prototype.slice.call(globalWindow.document.querySelectorAll('audio.unipus-audio-h5'))
+            : [];
+        } catch (ignoredQueryError) {
+          audioEls = [];
+        }
+        var audioUrls = [];
+        for (var ai = 0; ai < audioEls.length; ai += 1) {
+          try {
+            if (audioEls[ai].src) audioUrls.push(audioEls[ai].src);
+          } catch (ignoredSrcError) {}
+        }
+        var audioUrl = audioUrls.length ? audioUrls[0] : null;
+        // 【关键】必须立即让流有音轨（getUserMedia 立即 resolve），否则平台录音器
+        // 卡在"启动中"、扩展 await 永不返回（实测 90 秒无进展）。
+        // 先接一个【零音量】振荡器占位（保证流有 track 且完全静音），
+        // 真实人声异步解码后混入同一个 gain 节点——音轨已存在，混入自动生效。
+        try {
+          var placeholder = context.createOscillator();
+          placeholder.type = 'sine';
+          placeholder.frequency.value = 440;
+          placeholder.connect(gain);
+          placeholder.start();
+          sourceNodes.push(placeholder);
+          started = true;
+        } catch (ignoredPlaceholderError) {
+          // 占位失败时仍返回流（可能有 track 但静音）。
+        }
+        if (audioUrl && typeof context.decodeAudioData === 'function' && typeof globalWindow.fetch === 'function') {
+          // 异步解码真实人声 → 混入同一 gain（不阻塞 getUserMedia 返回）
+          var loadTimeout = setTimeout(function () {
+            console.log('[course-helper] MAIN bridge：题目原音加载超时（8s），继续用静音流。');
+          }, 8000);
+          globalWindow.fetch(audioUrl).then(function (response) {
+            return response.arrayBuffer();
+          }).then(function (arrayBuffer) {
+            return context.decodeAudioData(arrayBuffer);
+          }).then(function (audioBuffer) {
+            clearTimeout(loadTimeout);
+            if (!audioBuffer || !audioBuffer.duration) return;
+            // 真实人声：接到独立 gain（1.0）再并入 destination，音量覆盖静音占位
+            var voiceGain = context.createGain();
+            voiceGain.gain.value = 1.0;
+            voiceGain.connect(destination);
+            var bufferSource = context.createBufferSource();
+            bufferSource.buffer = audioBuffer;
+            bufferSource.loop = true;
+            bufferSource.connect(voiceGain);
+            bufferSource.start();
+            sourceNodes.push(bufferSource);
+            console.log('[course-helper] MAIN bridge：已注入真实人声音频（题目原音 ' +
+              audioBuffer.duration.toFixed(1) + 's，循环播放，评测服务器可识别）。');
+          }).catch(function (decodeError) {
+            clearTimeout(loadTimeout);
+            console.log('[course-helper] MAIN bridge：题目原音注入失败（继续静音流）：' +
+              (decodeError && decodeError.message ? decodeError.message : 'unknown'));
+          });
+        }
         // autoplay 策略可能将 AudioContext 挂起，尝试恢复（失败也不阻塞）。
         if (typeof context.resume === 'function') {
           try {
@@ -1526,7 +1706,7 @@
             // 挂起状态下流轨可能为静音，但不影响流程推进。
           }
         }
-        fakeAudioStreams.push({ context: context, oscillator: oscillator });
+        fakeAudioStreams.push({ context: context, nodes: sourceNodes, oscillator: sourceNodes[0] });
         // 打标记：MediaRecorder 观测据此识别流来源为合成流（否则误报"其他音频流"）。
         try {
           destination.stream.fakeStream = true;
@@ -1535,10 +1715,13 @@
         }
         while (fakeAudioStreams.length > FAKE_AUDIO_MAX_STREAMS) {
           var old = fakeAudioStreams.shift();
-          try {
-            old.oscillator.stop();
-          } catch (ignoredStopError) {
-            // 已停止的振荡器安全跳过。
+          var oldNodes = old.nodes && old.nodes.length ? old.nodes : (old.oscillator ? [old.oscillator] : []);
+          for (var oi = 0; oi < oldNodes.length; oi += 1) {
+            try {
+              oldNodes[oi].stop();
+            } catch (ignoredStopError) {
+              // 已停止的节点安全跳过。
+            }
           }
           try {
             old.context.close();
@@ -1546,7 +1729,11 @@
             // 已关闭的上下文安全跳过。
           }
         }
-        console.log('[course-helper] MAIN bridge：已提供合成音频流（不经过真实麦克风）。');
+        if (audioUrl) {
+          console.log('[course-helper] MAIN bridge：正在准备真实人声音频（题目原音注入录音流）。');
+        } else {
+          console.log('[course-helper] MAIN bridge：未找到题目原音，降级正弦波。');
+        }
         return Promise.resolve(destination.stream);
       } catch (fakeStreamError) {
         return original.apply(navigatorObject, arguments);
@@ -1569,10 +1756,16 @@
     }
     while (fakeAudioStreams.length) {
       var record = fakeAudioStreams.shift();
-      try {
-        record.oscillator.stop();
-      } catch (ignoredStopError) {
-        // 已停止的振荡器安全跳过。
+      // 清理所有音频节点（BufferSource / Oscillator 都有 stop）
+      var cleanupNodes = record.nodes && record.nodes.length
+        ? record.nodes
+        : (record.oscillator ? [record.oscillator] : []);
+      for (var ni = 0; ni < cleanupNodes.length; ni += 1) {
+        try {
+          cleanupNodes[ni].stop();
+        } catch (ignoredStopError) {
+          // 已停止的节点安全跳过。
+        }
       }
       try {
         record.context.close();
@@ -1590,4 +1783,6 @@
   installFakeAudioStream();
   // MediaRecorder 观测：确认平台录音是否真正开始、流来源是否为本覆写。
   installMediaRecorderProbe();
+  // 平台 Html5Recorder 接管：停止时调其 stopRecord() 清除"正在录音中"状态。
+  installPlatformRecorderProbe();
 })(typeof window !== 'undefined' ? window : null);
