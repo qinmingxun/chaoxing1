@@ -2125,19 +2125,23 @@ function setUnipusInputValue(element, value) {
   try {
     if (typeof element.dispatchEvent === "function") {
       let event = null;
-      let EventConstructor = null;
+      // InputEvent 优先（带 inputType/data，React 受控组件识别更可靠）；
+      // 回退 Event，最后回退最小对象。
       try {
         const view = element.ownerDocument && element.ownerDocument.defaultView;
-        EventConstructor = (view && typeof view.Event === "function" && view.Event) ||
+        const InputEventCtor = (view && typeof view.InputEvent === "function" && view.InputEvent) ||
+          (typeof InputEvent === "function" ? InputEvent : null);
+        const EventCtor = (view && typeof view.Event === "function" && view.Event) ||
           (typeof Event === "function" ? Event : null);
+        if (InputEventCtor) {
+          event = new InputEventCtor("input", { bubbles: true, composed: true, inputType: "insertText" });
+        } else if (EventCtor) {
+          event = new EventCtor("input", { bubbles: true, composed: true });
+        }
       } catch (_error) {
-        EventConstructor = typeof Event === "function" ? Event : null;
+        event = null;
       }
-      if (EventConstructor) {
-        event = new EventConstructor("input", { bubbles: true });
-      } else {
-        event = { type: "input", bubbles: true };
-      }
+      if (!event) event = { type: "input", bubbles: true };
       element.dispatchEvent(event);
     }
   } catch (_error) {
@@ -2279,28 +2283,61 @@ function findStopTextTarget(group) {
 // 真实指针事件序列点击：pointerdown → mousedown → pointerup → mouseup → click
 // （全部冒泡 + composed）。部分录音组件监听 pointer/mouse 事件而非 click，仅
 // element.click() 不触发；事件坐标取元素中心（rect 不可用时取 0，不阻断）。
+// 2026-10-20 关键修复：必须用 MouseEvent / PointerEvent 构造（不是 Event）——
+// new Event('click') 没有 clientX/clientY/button/buttons 属性，平台 React 处理函数
+// 读到 undefined 坐标后调用 elementFromPoint(NaN) 直接抛异常（实测日志
+// "Failed to execute 'elementFromPoint': double value is non-finite"），
+// 点击逻辑被中断 → 录音/翻页全部"无效"。
 function dispatchPointerClick(element) {
   const view = (element.ownerDocument && element.ownerDocument.defaultView) || getGlobalRoot();
-  const EventConstructor = (view && view.Event) || (typeof Event !== "undefined" ? Event : null);
-  if (!EventConstructor || typeof element.dispatchEvent !== "function") return false;
+  if (!view || typeof element.dispatchEvent !== "function") return false;
+  const MouseEventCtor = view.MouseEvent || (typeof MouseEvent !== "undefined" ? MouseEvent : null);
+  const PointerEventCtor = view.PointerEvent || (typeof PointerEvent !== "undefined" ? PointerEvent : null);
+  if (!MouseEventCtor && !PointerEventCtor) return false;
   let rect = null;
   try {
     rect = element.getBoundingClientRect();
   } catch (_error) {
     rect = null;
   }
-  const clientX = rect && typeof rect.left === "number" ? rect.left + (rect.width || 0) / 2 : 0;
-  const clientY = rect && typeof rect.top === "number" ? rect.top + (rect.height || 0) / 2 : 0;
-  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+  // 坐标必须是有限数（NaN/Infinity 会让平台 elementFromPoint 崩溃）
+  const rawX = rect && Number.isFinite(rect.left) && Number.isFinite(rect.width)
+    ? rect.left + (rect.width || 0) / 2 : 0;
+  const rawY = rect && Number.isFinite(rect.top) && Number.isFinite(rect.height)
+    ? rect.top + (rect.height || 0) / 2 : 0;
+  const clientX = Number.isFinite(rawX) ? Math.round(rawX) : 0;
+  const clientY = Number.isFinite(rawY) ? Math.round(rawY) : 0;
+  const baseInit = {
+    bubbles: true, cancelable: true, composed: true, view,
+    clientX: clientX, clientY: clientY, screenX: clientX, screenY: clientY,
+    detail: 1, button: 0, buttons: 0,
+  };
+  const plan = [
+    ["pointerdown", PointerEventCtor, 1],
+    ["mousedown", MouseEventCtor, 1],
+    ["pointerup", PointerEventCtor, 0],
+    ["mouseup", MouseEventCtor, 0],
+    ["click", MouseEventCtor, 0],
+  ];
+  let dispatched = 0;
+  for (const [type, preferredCtor, pressed] of plan) {
+    const EventCtor = preferredCtor || MouseEventCtor;
+    if (!EventCtor) continue;
     try {
-      element.dispatchEvent(new EventConstructor(type, {
-        bubbles: true, cancelable: true, composed: true, clientX, clientY, button: 0,
-      }));
+      const init = Object.assign({}, baseInit, { buttons: pressed });
+      if (PointerEventCtor && EventCtor === PointerEventCtor) {
+        Object.assign(init, {
+          pointerId: 1, pointerType: "mouse", isPrimary: true,
+          width: 1, height: 1, pressure: pressed ? 0.5 : 0,
+        });
+      }
+      element.dispatchEvent(new EventCtor(type, init));
+      dispatched += 1;
     } catch (_error) {
       // 单个事件派发失败继续后续事件。
     }
   }
-  return true;
+  return dispatched > 0;
 }
 
 // 通用点击（页脚提交/下一题/继续学习）：指针事件序列优先（覆盖只监听 pointer/mouse
@@ -2900,6 +2937,8 @@ function findSubmitButton(doc) {
 }
 
 // 安全点击：优先原生 click()，失败回退派发 click 事件（bubbles）。
+// 安全点击：原生 click() 优先；失败回退 MouseEvent（带坐标——Event 缺坐标会让
+// 平台 elementFromPoint 崩溃，2026-10-20 实测）。
 function clickElementSafely(context, element) {
   if (!element) return false;
   try {
@@ -2909,9 +2948,20 @@ function clickElementSafely(context, element) {
     try {
       const doc = getContextDocument(context);
       const view = (doc && doc.defaultView) || getGlobalRoot();
-      const EventConstructor = view && view.Event ? view.Event : (typeof Event !== "undefined" ? Event : null);
-      if (EventConstructor && typeof element.dispatchEvent === "function") {
-        element.dispatchEvent(new EventConstructor("click", { bubbles: true }));
+      const MouseEventCtor = (view && view.MouseEvent) || (typeof MouseEvent !== "undefined" ? MouseEvent : null);
+      if (MouseEventCtor && typeof element.dispatchEvent === "function") {
+        let rect = null;
+        try { rect = element.getBoundingClientRect(); } catch (_e) { rect = null; }
+        const rawX = rect && Number.isFinite(rect.left) && Number.isFinite(rect.width)
+          ? rect.left + (rect.width || 0) / 2 : 0;
+        const rawY = rect && Number.isFinite(rect.top) && Number.isFinite(rect.height)
+          ? rect.top + (rect.height || 0) / 2 : 0;
+        element.dispatchEvent(new MouseEventCtor("click", {
+          bubbles: true, cancelable: true, composed: true, view,
+          clientX: Number.isFinite(rawX) ? Math.round(rawX) : 0,
+          clientY: Number.isFinite(rawY) ? Math.round(rawY) : 0,
+          detail: 1, button: 0, buttons: 0,
+        }));
         return true;
       }
     } catch (_dispatchError) {
