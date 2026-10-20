@@ -477,6 +477,13 @@
       return state;
     }
 
+    // 版本标记（2026-10-20）：重载扩展后日志首行即可确认运行的代码版本，
+    // 避免"改了代码但浏览器跑的是旧版"的排查浪费。修改 unipus.js/bridge 后递增。
+    try {
+      console.log('[course-helper] [course-helper] 扩展已加载：' + adapterEntry.name +
+        ' 适配器 v2026-10-20.3（语音题自动录音/停止控件探测版）');
+    } catch (_error) { /* 日志失败不影响流程 */ }
+
     try {
       await adapter.init(context);
     } catch (error) {
