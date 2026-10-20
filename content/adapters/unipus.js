@@ -2615,6 +2615,57 @@ function probeRecordControls(context) {
   return { controls };
 }
 
+// ---- 全页可点击元素结构 dump（2026-10-20 诊断）----
+// 平台"停止录音"按钮不在 .record-button-group 内且无"停止"文案（旧扫描 [无] 命中），
+// 需要看清页面上所有可点击元素（cursor:pointer / onclick / 小尺寸图标）的真实结构。
+// 输出：tag + class + id + 文本 + 尺寸 + cursor，最多 30 个（按尺寸从小到大，
+// 图标按钮优先），供精确定位停止控件。
+function dumpClickableElements(context) {
+  const doc = getContextDocument(context);
+  if (!doc || typeof doc.querySelectorAll !== "function") return;
+  const view = (doc.defaultView) || getGlobalRoot();
+  const items = [];
+  const seen = new Set();
+  for (const selector of ["button", '[role="button"]', "a", "div", "span", "i", "svg", "img", "input"]) {
+    for (const element of safeQueryAll(doc, selector)) {
+      if (seen.has(element)) continue;
+      seen.add(element);
+      if (!isElementVisible(element)) continue;
+      let rect = null;
+      try { rect = element.getBoundingClientRect(); } catch (_e) { rect = null; }
+      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+      if (rect.width > 300 || rect.height > 150) continue; // 排除大容器
+      let cursor = "";
+      let cls = "";
+      let id = "";
+      let text = "";
+      try {
+        cursor = view && view.getComputedStyle ? view.getComputedStyle(element).cursor : "";
+        cls = asString(element.className).slice(0, 70);
+        id = asString(element.id).slice(0, 40);
+        text = asString(element.textContent).replace(/\s+/g, "").trim().slice(0, 16);
+      } catch (_e) { continue; }
+      const clickable = /pointer/i.test(cursor) || asString(element.tagName).toLowerCase() === "button" ||
+        asString(element.tagName).toLowerCase() === "a";
+      if (!clickable) continue;
+      items.push({
+        size: Math.round(rect.width) + "x" + Math.round(rect.height),
+        desc: `<${asString(element.tagName).toLowerCase()}${cls ? ` class="${cls}"` : ""}${id ? ` id="${id}"` : ""}` +
+          ` ${Math.round(rect.width)}x${Math.round(rect.height)}${text ? ` text="${text}"` : ""}>`,
+        area: rect.width * rect.height,
+      });
+    }
+  }
+  items.sort((a, b) => a.area - b.area); // 小图标优先
+  const uniq = [];
+  for (const item of items) {
+    if (!uniq.includes(item.desc)) uniq.push(item.desc);
+    if (uniq.length >= 30) break;
+  }
+  unipusLog(context,
+    `u校园语音题：全页可点击元素 dump（${uniq.length} 个，小尺寸优先）——` + (uniq.join(" | ") || "无"));
+}
+
 // 录音状态判定：平台提示"正在录音中"或存在录音态控件 → true。
 // 用于决定"是否需要点停止"（平台自动开录时不需要点开始）。
 function detectRecordingActive(context) {
@@ -2643,6 +2694,8 @@ function detectRecordingActive(context) {
 
 async function simulateVoiceRecordings(context) {
   const doc = getContextDocument(context);
+  // 版本标记（诊断用：一眼确认跑的是哪版代码，避免"改了但跑旧版"）
+  unipusLog(context, "u校园语音题：模块版本 v2026-10-20.4（自动录音探测+控件dump）");
   // 先探测全页录音控件（输出真实结构，供下次精确定位）
   const probe = probeRecordControls(context);
   if (probe.controls.length) {
@@ -2654,6 +2707,8 @@ async function simulateVoiceRecordings(context) {
   }
   // 平台是否已自动开始录音（提示"正在录音中"或录音态控件存在）
   const alreadyRecording = detectRecordingActive(context);
+  // 全页可点击元素结构 dump（定位平台真实"停止录音"控件）
+  dumpClickableElements(context);
   unipusLog(context, `u校园语音题：当前录音状态判定 = ${alreadyRecording ? "已自动开始录音" : "未在录音"}。`);
   const initialButtons = collectRecordButtons(doc);
   if (!initialButtons.length && !alreadyRecording) {

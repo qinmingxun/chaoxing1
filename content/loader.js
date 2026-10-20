@@ -479,9 +479,16 @@
 
     // 版本标记（2026-10-20）：重载扩展后日志首行即可确认运行的代码版本，
     // 避免"改了代码但浏览器跑的是旧版"的排查浪费。修改 unipus.js/bridge 后递增。
+    // 同时写入 DOM 属性：控制台执行 document.documentElement.dataset.courseHelperVersion
+    // 即可秒查当前运行版本（页面可见/可查，不依赖日志滚动）。
+    const ADAPTER_VERSION = 'v2026-10-20.4（语音题自动录音+全页控件dump）';
     try {
       console.log('[course-helper] [course-helper] 扩展已加载：' + adapterEntry.name +
-        ' 适配器 v2026-10-20.3（语音题自动录音/停止控件探测版）');
+        ' 适配器 ' + ADAPTER_VERSION);
+      const rootDoc = root && root.document;
+      if (rootDoc && rootDoc.documentElement) {
+        rootDoc.documentElement.setAttribute('data-course-helper-version', ADAPTER_VERSION);
+      }
     } catch (_error) { /* 日志失败不影响流程 */ }
 
     try {
