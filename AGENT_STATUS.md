@@ -181,3 +181,12 @@
 - **发现并修复真实缺陷：混合页页面填答错位**——fillAnswersToPage 原按完整答案队列（含选择题占位）与页面输入框顺序对齐，混合页（判断+填空）时填空 input 被填入判断题答案（实测 input 填了 "B" 而非 "blue"）。修复：runAutoAnswer 同步收集 textAnswers（仅文本题答案按题目顺序），页面填答与观察者改用 textAnswers；提交注入队列不受影响（位置填充语义不变）。修复后 input 正确填入 blue。
 - **service-worker 新增 deepseekApiBase 存储键**（默认官方 api.deepseek.com 不变；支持自建代理/测试 mock 覆盖端点，仅接受 http(s) URL，非法值回退默认）——实测用它把 DeepSeek 请求指向本地 mock。
 - 回归处理：13 项 mock 测试中 11 绿；unipus-choice-multi（题块隔离）与 unipus-auto-trigger（监听数量断言）为历史遗留 mock 问题（已对照验证与本轮修改无关，stash 对照均失败）；auto-trigger 已修（size>=1），choice-multi 留待后续（真实平台选择题题块定位以 option-wrap 路径为主）。
+
+## AGENT 32 真实平台快照修正（2026-10-20，用户重测日志驱动）
+
+- 用户重测提供第一份真实 DOM 快照：.record-button-group 内 child[0]=.record-button-wrap（录音按钮），child[1]=.question-audio（audio-origin 原音 / audio-replay 回放，audio.unipus-audio-h5 + "Your browser does not support" 回退文本）——**旧 nth-child(2) 点的是音频播放器，录音开始点击一直打偏**（此前"停不下来"的次要根因）。
+- 修正 collectRecordButtons：首选 .record-button-group .record-button-wrap（新常量 VOICE_RECORD_BUTTON_SELECTOR），最深后代点击（deepestClickTarget 提取复用）；旧结构保留 fallback。
+- **语音题页脚按钮为"下一题"而非"提交/继续学习"**（用户报告"点提交不跳下一题"）——findSubmitButton 文本匹配扩为 /提交|下一题/（干扰词排除不变），pollAutoContinue 翻页匹配扩为 /继续学习|下一题/。
+- findStopTextTarget 增加 class/aria 录音态特征兜底（stop/recording/rec-ing；真实按钮为图标无文本，录音态文案无法从开始态快照采集）。
+- 回归 5 项全绿 + verify-live deaf 循环复测 ALL-PASS；提交 65d1d85 已推送。
+- 待用户下次重测确认：录音开始是否命中（看"录音中 DOM 快照"是否出现录音态）、停止是否生效、"下一题"翻页是否闭环。
