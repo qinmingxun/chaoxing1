@@ -2514,15 +2514,34 @@ async function tryStopRecording(context, index) {
   }
   if (await verifyStopOutcome(context)) return "dom";
 
-  // 策略 2：全页扫描"停止/stop"文本（含伪元素文本）的可见未禁用按钮。
+  // 策略 2：全页扫描录音控件（文本/伪元素/class/id/aria/title 含停止语义）——
+  // 真实停止按钮可能不在 .record-button-group 内（2026-10-20 实证：平台自动录音，
+  // 停止控件为独立元素，可能是 div/span/i 而非 button）。
   const stopCandidates = [];
-  for (const selector of ['button', '[role="button"]', 'a', '.ant-btn', '[class*="btn" i]']) {
+  const stopSeen = new Set();
+  for (const selector of ['button', '[role="button"]', 'a', '.ant-btn', '[class*="btn" i]',
+    '[class*="record" i]', '[class*="stop" i]', '[class*="audio-control" i]', 'i', 'span', 'div']) {
     for (const element of safeQueryAll(doc, selector)) {
+      if (stopSeen.has(element)) continue;
+      stopSeen.add(element);
       const text = asString(element.textContent).replace(/\s+/g, "").trim();
       const pseudo = getElementPseudoText(element);
-      if (!/停止|stop/i.test(text) && !/停止|stop/i.test(pseudo)) continue;
+      let attrs = "";
+      try {
+        attrs = asString(element.className) + " " + asString(element.id) + " " +
+          asString(element.getAttribute && element.getAttribute("aria-label")) + " " +
+          asString(element.getAttribute && element.getAttribute("title"));
+      } catch (_error) { attrs = ""; }
+      const textHit = /停止|stop/i.test(text) || /停止|stop/i.test(pseudo);
+      const attrHit = /(^|[-_"\s])(stop|recording|stop-?record|录音中|停止录音)/i.test(attrs);
+      if (!textHit && !attrHit) continue;
       if (!isElementVisible(element)) continue;
       if (element.disabled === true || element.getAttribute("aria-disabled") === "true") continue;
+      // 排除过大的容器（整页 div 的 textContent 也含"停止"）
+      let rect = null;
+      try { rect = element.getBoundingClientRect(); } catch (_e) { rect = null; }
+      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+      if (rect.width > 400 || rect.height > 200) continue;
       stopCandidates.push(element);
     }
   }
@@ -2550,21 +2569,118 @@ async function tryStopRecording(context, index) {
   return "bridge";
 }
 
+// ---- 全页录音控件探测（2026-10-20 真实平台语义修正）----
+// 平台实证：进入语音题页即【自动开始录音】（点"下一题"提示"正在录音中"），
+// 需要点击平台自己的"停止录音"按钮结束。.record-button-wrap 实为【播放原音/回放】
+// 按钮（内含 question-audio + audio-control-trumpet 喇叭图标），不是录音入口。
+// 本探测器全页扫描录音相关控件：class/id/aria/title 含 record|录音|mic|voice 的
+// 可见元素，输出其结构供精确定位（含 audio 标签与按钮候选）。
+const RECORD_CONTROL_HINT = /record|录音|mic|voice|speak|oral/i;
+function probeRecordControls(context) {
+  const doc = getContextDocument(context);
+  if (!doc) return { controls: [], stopCandidates: [] };
+  const controls = [];
+  const seen = new Set();
+  for (const selector of ["button", '[role="button"]', "a", "div", "span", "i", "svg"]) {
+    for (const element of safeQueryAll(doc, selector)) {
+      if (seen.has(element)) continue;
+      seen.add(element);
+      let cls = "";
+      let id = "";
+      let aria = "";
+      let title = "";
+      try {
+        cls = asString(element.className).slice(0, 60);
+        id = asString(element.id);
+        aria = asString(element.getAttribute && element.getAttribute("aria-label"));
+        title = asString(element.getAttribute && element.getAttribute("title"));
+      } catch (_error) { continue; }
+      const haystack = cls + " " + id + " " + aria + " " + title;
+      if (!RECORD_CONTROL_HINT.test(haystack)) continue;
+      if (!isElementVisible(element)) continue;
+      // 只看有独立尺寸的叶子级候选（避免整页容器刷屏）
+      let rect = null;
+      try { rect = element.getBoundingClientRect(); } catch (_e) { rect = null; }
+      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+      if (rect.width > 400 || rect.height > 200) continue;
+      controls.push({
+        element,
+        desc: `<${asString(element.tagName).toLowerCase()} class="${cls}"${id ? ` id="${id}"` : ""}` +
+          `${aria ? ` aria-label="${aria}"` : ""}${title ? ` title="${title}"` : ""} ` +
+          `${Math.round(rect.width)}x${Math.round(rect.height)}>`,
+        text: asString(element.textContent).replace(/\s+/g, "").trim().slice(0, 20),
+      });
+    }
+  }
+  return { controls };
+}
+
+// 录音状态判定：平台提示"正在录音中"或存在录音态控件 → true。
+// 用于决定"是否需要点停止"（平台自动开录时不需要点开始）。
+function detectRecordingActive(context) {
+  const doc = getContextDocument(context);
+  if (!doc) return false;
+  // 1) 平台提示弹窗含"正在录音"
+  for (const selector of [".ant-message-notice-content", '[class*="toast" i]', '[role="alert"]']) {
+    for (const element of safeQueryAll(doc, selector)) {
+      if (!isElementVisible(element)) continue;
+      if (/正在录音|录音中/.test(asString(element.textContent))) return true;
+    }
+  }
+  // 2) 录音态控件（class 含 recording/stop-record 等）
+  for (const element of safeQueryAll(doc, "button, [role=button], a, div, span, i")) {
+    let haystack = "";
+    try {
+      haystack = asString(element.className) + " " + asString(element.id) + " " +
+        asString(element.getAttribute && element.getAttribute("aria-label"));
+    } catch (_error) { continue; }
+    if (!/(recording|stop-?record|record-?ing|录音中|停止录音)/i.test(haystack)) continue;
+    if (!isElementVisible(element)) continue;
+    return true;
+  }
+  return false;
+}
+
 async function simulateVoiceRecordings(context) {
   const doc = getContextDocument(context);
+  // 先探测全页录音控件（输出真实结构，供下次精确定位）
+  const probe = probeRecordControls(context);
+  if (probe.controls.length) {
+    unipusLog(context,
+      `u校园语音题：全页录音控件探测（${probe.controls.length} 个）——` +
+      probe.controls.slice(0, 8).map((c) => `${c.desc}${c.text ? ` text="${c.text}"` : ""}`).join(" | "));
+  } else {
+    unipusLog(context, "u校园语音题：全页未探测到录音相关控件（class/id/aria/title 含 record|录音|mic）。");
+  }
+  // 平台是否已自动开始录音（提示"正在录音中"或录音态控件存在）
+  const alreadyRecording = detectRecordingActive(context);
+  unipusLog(context, `u校园语音题：当前录音状态判定 = ${alreadyRecording ? "已自动开始录音" : "未在录音"}。`);
   const initialButtons = collectRecordButtons(doc);
-  if (!initialButtons.length) {
+  if (!initialButtons.length && !alreadyRecording) {
     unipusWarn(context,
-      "u校园语音题：未找到录音按钮（.record-button-group），无法模拟录音，提交可能被前端校验拦截。");
+      "u校园语音题：未找到录音按钮（.record-button-group）且未检测到自动录音，无法模拟录音，提交可能被前端校验拦截。");
     return false;
   }
+  // ---- 场景 A：平台已自动开始录音（2026-10-20 实证：进页面即录）----
+  // 只需停止录音，不需要点任何"开始"。等待录音窗口后调用停止链路。
+  if (alreadyRecording) {
+    unipusLog(context,
+      `u校园语音题：平台已自动录音，等待 ${VOICE_RECORD_DURATION_MS}ms 录音窗口后执行停止。`);
+    await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
+    snapshotRecordingDom(context); // 录音中快照（自动收集停止按钮证据）
+    const stopOutcome = await tryStopRecording(context, 0);
+    unipusLog(context, `u校园语音题：停止结果 = ${stopOutcome}（dom=按钮命中 / bridge=强制停止 / none=未确认）。`);
+    if (stopOutcome === "none") {
+      unipusWarn(context, "u校园语音题：自动录音的停止未确认，提交可能仍被拦截（见上方录音控件探测）。");
+    }
+    return true;
+  }
+
+  // ---- 场景 B：需要手动点开始录音（旧结构 .record-button-group）----
   const count = initialButtons.length;
   unipusLog(context,
     `u校园语音题：模拟录音 ${count} 处（逐题：开始 → ${VOICE_RECORD_DURATION_MS}ms → 停止；` +
     "每次点击前实时查询按钮，防止 React 重渲染替换节点后旧引用失效）。");
-  // 逐题录音（平台单录模式：同时开始多题会被互相打断）；
-  // 每次点击前实时查询按钮——录音开始后 React 会重渲染按钮（开始↔停止切换），
-  // 旧 DOM 引用点击无效（实测：录了停不下来的原因）。
   for (let index = 0; index < count; index += 1) {
     const startButtons = collectRecordButtons(doc);
     if (index >= startButtons.length) {
@@ -2572,22 +2688,12 @@ async function simulateVoiceRecordings(context) {
       continue;
     }
     const clickTarget = startButtons[index];
-    const clickOk = clickRecordTarget(context, clickTarget); // 开始录音（指针序列优先）
+    const clickOk = clickRecordTarget(context, clickTarget);
     unipusLog(context,
       `u校园语音题：第 ${index + 1} 处开始录音点击${clickOk ? "已派发" : "失败"}，目标 ${describeElement(clickTarget)}。`);
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    // 点击后 UI 态采样：wrap class 是否变化（React 录音态一般换 class 或加子节点）
-    const wrapAfterClick = safeQuery(getContextDocument(context), VOICE_RECORD_BUTTON_SELECTOR);
-    if (wrapAfterClick) {
-      const clsAfter = asString(wrapAfterClick.className).slice(0, 60);
-      let htmlAfter = "";
-      try { htmlAfter = asString(wrapAfterClick.innerHTML).replace(/\s+/g, " ").slice(0, 120); } catch (_e) { htmlAfter = "?"; }
-      unipusLog(context,
-        `u校园语音题：点击后按钮态 class="${clsAfter}" innerHTML=${htmlAfter}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS - 400));
-    snapshotRecordingDom(context); // 录音中快照（每题一次，自动收集停止按钮证据）
-    const outcome = await tryStopRecording(context, index); // 三级停止策略
+    await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
+    snapshotRecordingDom(context);
+    const outcome = await tryStopRecording(context, index);
     if (outcome === "none") {
       unipusWarn(context, `u校园语音题：第 ${index + 1} 处录音停止未确认，继续下一处。`);
     }
