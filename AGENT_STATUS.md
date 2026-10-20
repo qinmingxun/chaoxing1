@@ -227,3 +227,27 @@
     文本或 class/id/aria/title 含停止语义即候选（排除 >400x200 容器），解决真实停止控件
     非 button 标签的问题。
 - 回归 5 项全绿；已推送。待重测确认：录音控件探测输出（真实停止控件结构）与停止是否生效。
+
+## AGENT 36 点击事件坐标根因修复（2026-10-20，完整日志实证）
+
+- 用户提供完整控制台日志（371 行），其中决定性报错：
+  `content_main.js:17428 Uncaught TypeError: Failed to execute 'elementFromPoint' on
+  'Document': The provided double value is non-finite.` —— 堆栈起点在
+  `HTMLDocument.n`（平台 React 点击处理），由我们的合成点击触发。
+- **根因**：dispatchPointerClick / clickElementSafely 用 `new Event('click')` 派发点击。
+  Event 构造器没有 clientX/clientY/button/buttons 属性 → 平台处理函数读到 undefined
+  坐标 → `document.elementFromPoint(NaN, NaN)` 抛 TypeError → **平台点击逻辑当场中断**。
+  这就是"录音不开始/停止无效/点下一题提示正在录音中但不跳转"的真正原因：事件送达了，
+  但平台的处理函数在第一步就崩了。
+- 修复（6a765ac，模块版本 20261020.6）：
+  - dispatchPointerClick 改用 MouseEvent / PointerEvent 构造，带完整
+    clientX/clientY/screenX/screenY/detail/button/buttons/view，坐标取元素中心且用
+    Number.isFinite 保证有限数（NaN/Infinity 直接归 0）；PointerEvent 额外带
+    pointerId/pointerType/isPrimary/pressure/width/height。
+  - clickElementSafely 的 dispatchEvent 回退路径同样改用带坐标 MouseEvent。
+  - 填答 input 事件升级为 InputEvent（带 inputType=insertText、composed）。
+- 时间线澄清（重要）：用户此前"重载后日志不变"并非缓存问题——该份日志抓取时间
+  16:05-16:06，而 MouseEvent 修复 16:08-16:09 才落盘提交，属于"日志早于修复"。
+  行号核对：32f9a92（14:23）版本 unipus.js 的 simulateVoiceRecordings 调用恰在 2059 行，
+  与堆栈一致。ESM 模块缓存破坏（MODULE_CACHE_VERSION）仍然保留作为保险。
+- 回归 4 项全绿 + verify-live deaf 循环 ALL-PASS；已推送。
