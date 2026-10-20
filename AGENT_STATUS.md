@@ -206,3 +206,24 @@
 - 新增 capturePageFeedback：点击后 1.2 秒扫描平台提示弹窗（.ant-message-notice-content/.ant-modal-body/[role=alert]/toast/tip 等）并日志输出——若为"请先录音/录音不完整"类前端校验提示，下次重测日志直接可见拦截原因。
 - 回归 4 项全绿；提交 62e4817 已推送。
 - 待重测确认：页脚按钮指针序列点击是否触发翻页、平台提示文本是什么（决定录音为何未被认可）。
+
+## AGENT 35 语音题语义重大修正（2026-10-20，决定性日志实证）
+
+- 第三次重测日志给出决定性证据：
+  1. **.record-button-wrap 不是录音按钮，而是【播放原音/回放】按钮**——innerHTML 为
+     `<div class="question-audio audio-origin"><audio class="unipus-audio-h5" src="https://ucontent.cdn.unipus.cn/...mp3">` +
+     `<span class="audio-control-box audio-control-trumpet"><svg>…喇叭图标</svg></span>`；
+     子元素尺寸 24x24 的 audio-control-trumpet 是播放/喇叭控件。此前所有"点开始录音"实际在点播放器。
+  2. **平台进入语音题页即自动开始录音**：点"下一题"后平台提示「正在录音中」——说明录音已由平台
+     自动开启，只需点平台自己的"停止录音"控件结束；该控件不在 .record-button-group 内。
+- 代码修正（f10937a）：
+  - 新增 probeRecordControls：全页扫描 class/id/aria/title 含 record|录音|mic|voice|speak|oral
+    的可见控件（限 400x200 内），日志输出真实结构，供精确定位停止控件。
+  - 新增 detectRecordingActive：平台提示含"正在录音中/录音中"或存在 recording/stop-record
+    类控件 → 判定已自动录音。
+  - simulateVoiceRecordings 拆双场景：场景 A（已自动录音）→ 等录音窗口后直接走停止链路，
+    不点任何"开始"；场景 B（旧结构手动开始）保留原逻辑。
+  - 停止策略 2 扩展到 div/span/i/[class*=record]/[class*=stop]/[class*=audio-control]，
+    文本或 class/id/aria/title 含停止语义即候选（排除 >400x200 容器），解决真实停止控件
+    非 button 标签的问题。
+- 回归 5 项全绿；已推送。待重测确认：录音控件探测输出（真实停止控件结构）与停止是否生效。
