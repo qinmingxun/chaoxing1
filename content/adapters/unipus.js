@@ -2240,6 +2240,9 @@ function installPageFillObserver(context, answers) {
 
 const VOICE_RECORD_DURATION_MS = 3000; // 录音窗口时长
 const VOICE_RECORD_GROUP_SELECTOR = ".record-button-group";
+// 真实结构（2026-10-20 快照）：录音按钮为 group 内 .record-button-wrap；
+// .question-audio（audio-origin 原音 / audio-replay 回放）是音频播放器，不是按钮。
+const VOICE_RECORD_BUTTON_SELECTOR = ".record-button-group .record-button-wrap";
 const VOICE_STOP_VERIFY_DELAY_MS = 600; // 停止点击后的验证等待（React 状态切换）
 
 // 组内"停止"目标（录音态）：取【最深】命中——React 录音组件的原生监听常绑在
@@ -2249,7 +2252,13 @@ function findStopTextTarget(group) {
   let best = null;
   for (const element of safeQueryAll(group, "*")) {
     const text = asString(element.textContent).replace(/\s+/g, "");
-    if (!/停止|stop/i.test(text) && !/停止|stop/i.test(getElementPseudoText(element))) continue;
+    const cls = asString(element.className).toLowerCase();
+    const aria = asString(element.getAttribute && element.getAttribute("aria-label")).toLowerCase();
+    // 文本/伪元素命中"停止"文案；或 class/aria 标识录音态（stop/ing/rec 常见命名——
+    // 真实平台按钮为图标无文本，快照无法采集录音态文案，特征兜底）。
+    const textHit = /停止|stop/i.test(text) || /停止|stop/i.test(getElementPseudoText(element));
+    const attrHit = /(^|[-_])(stop|recording|rec-?ing)/.test(cls) || /(停止|stop|recording)/.test(aria);
+    if (!textHit && !attrHit) continue;
     best = element;
   }
   return best;
@@ -2350,9 +2359,45 @@ async function verifyStopOutcome(context) {
   return voiceRecordingStoppedSeen;
 }
 
+// 取元素内最深后代（点击目标）：平台原生监听常绑深层，深点冒泡覆盖全部祖先。
+function deepestClickTarget(element) {
+  if (!element || typeof element.querySelectorAll !== "function") return element;
+  const descendants = safeQueryAll(element, "*");
+  let deepest = null;
+  let deepestDepth = -1;
+  for (const descendant of descendants) {
+    let depth = 0;
+    let node = descendant;
+    try {
+      while (node && node.parentElement && node !== element) {
+        depth += 1;
+        node = node.parentElement;
+      }
+    } catch (_error) {
+      depth = 0;
+    }
+    if (depth > deepestDepth) {
+      deepestDepth = depth;
+      deepest = descendant;
+    }
+  }
+  return deepest || element;
+}
+
 function collectRecordButtons(doc) {
   const buttons = [];
   if (!doc) return buttons;
+  const seen = new Set();
+  // 真实结构（2026-10-20 快照）：录音按钮为 group 内 .record-button-wrap（child[0]）；
+  // child[1] 是 .question-audio 音频播放器（audio-origin 原音 / audio-replay 回放）——
+  // 旧 nth-child(2) 会点到播放器（点击无效的次要原因）。最深后代点击经冒泡命中监听。
+  for (const wrap of safeQueryAll(doc, VOICE_RECORD_BUTTON_SELECTOR)) {
+    if (seen.has(wrap)) continue;
+    seen.add(wrap);
+    buttons.push(deepestClickTarget(wrap));
+  }
+  if (buttons.length) return buttons;
+  // 旧结构 fallback（2026-10-18 实测：nth-child(2) 为麦克风）。
   for (const group of safeQueryAll(doc, VOICE_RECORD_GROUP_SELECTOR)) {
     let children = [];
     try {
@@ -2360,35 +2405,10 @@ function collectRecordButtons(doc) {
     } catch (_error) {
       children = [];
     }
-    // 用户实测：第 2 个子元素是麦克风按钮（.record-button-group > div:nth-child(2)
-    // 内 div > span > svg）。点击目标取该元素的【最深子元素】（如 svg）：
-    // 平台的原生 click 监听常绑在深层元素上，点外层 div 事件不经过深层元素、
-    // 监听不触发；点最深元素会冒泡覆盖所有祖先（React 委托同样命中）。
     const wrapper = children.length >= 2 ? children[1] : (children[0] || group);
-    let target = wrapper;
-    if (wrapper && typeof wrapper.querySelectorAll === "function") {
-      const descendants = safeQueryAll(wrapper, "*");
-      let deepest = null;
-      let deepestDepth = -1;
-      for (const descendant of descendants) {
-        let depth = 0;
-        let node = descendant;
-        try {
-          while (node && node.parentElement && node !== wrapper) {
-            depth += 1;
-            node = node.parentElement;
-          }
-        } catch (_error) {
-          depth = 0;
-        }
-        if (depth > deepestDepth) {
-          deepestDepth = depth;
-          deepest = descendant;
-        }
-      }
-      if (deepest) target = deepest;
-    }
-    if (target) buttons.push(target);
+    if (!wrapper || seen.has(wrapper)) continue;
+    seen.add(wrapper);
+    buttons.push(deepestClickTarget(wrapper));
   }
   return buttons;
 }
@@ -2597,15 +2617,16 @@ function findSubmitButton(doc) {
   const consider = (element, isFoot) => {
     const text = asString(element.textContent).trim();
     const pseudo = isFoot ? getElementPseudoText(element) : "";
-    if (/提交/.test(text) || /提交/.test(pseudo)) stats.withText += 1;
-    if (stats.texts.length < 5 && /提交/.test(text)) stats.texts.push(text.slice(0, 24));
+    // 语音题页脚按钮为"下一题"（2026-10-20 实测），与"提交"同级命中。
+    if (/提交|下一题/.test(text) || /提交|下一题/.test(pseudo)) stats.withText += 1;
+    if (stats.texts.length < 5 && /提交|下一题/.test(text)) stats.texts.push(text.slice(0, 24));
     if (stats.pseudo.length < 5 && pseudo) stats.pseudo.push(pseudo.slice(0, 24));
     if (!isElementVisible(element)) return null;
     if (isFoot) stats.footVisible += 1;
     if (element.disabled === true || element.getAttribute("aria-disabled") === "true") return null;
-    // 文本或伪元素文本含"提交"（排除"提交反馈/评论/意见/问题"等干扰词）即命中。
-    if (/提交/.test(text) && !/提交(?:反馈|评论|意见|问题)/.test(text)) return element;
-    if (/提交/.test(pseudo)) return element;
+    // 文本或伪元素文本含"提交/下一题"（排除"提交反馈/评论/意见/问题"等干扰词）即命中。
+    if (/提交|下一题/.test(text) && !/提交(?:反馈|评论|意见|问题)/.test(text)) return element;
+    if (/提交|下一题/.test(pseudo)) return element;
     if (isFoot) footFallback = element;
     return null;
   };
@@ -2746,18 +2767,19 @@ function scheduleAutoContinue(context) {
 function pollAutoContinue(context) {
   autoContinueState.timer = null;
   const doc = getContextDocument(context);
-  const link = doc ? findFootLinkByText(doc, /继续学习/) : null;
+  // 语音题页脚为"下一题"（2026-10-20 实测），其余场景为"继续学习"——一并匹配。
+  const link = doc ? findFootLinkByText(doc, /继续学习|下一题/) : null;
   if (link) {
     autoContinueState.clicked = true;
     if (clickElementSafely(context, link)) {
-      unipusLog(context, "u校园自动翻页：已点击“继续学习”按钮，等待下一页题目到达。");
+      unipusLog(context, "u校园自动翻页：已点击页脚翻页按钮（继续学习/下一题），等待下一页题目到达。");
     } else {
-      unipusWarn(context, "u校园自动翻页：“继续学习”按钮点击失败。");
+      unipusWarn(context, "u校园自动翻页：页脚翻页按钮点击失败。");
     }
     return;
   }
   if (Date.now() >= autoContinueState.deadline) {
-    unipusWarn(context, "u校园自动翻页：60 秒内未出现“继续学习”按钮，已停止等待（可手动点击继续）。");
+    unipusWarn(context, "u校园自动翻页：60 秒内未出现“继续学习/下一题”按钮，已停止等待（可手动点击继续）。");
     return;
   }
   autoContinueState.timer = setTimeout(() => pollAutoContinue(context), AUTO_CONTINUE_POLL_MS);
