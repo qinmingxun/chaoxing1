@@ -2254,7 +2254,10 @@ function installPageFillObserver(context, answers) {
 // MediaRecorder 强制停止兜底（course-helper:main:ucampus-stop-recording）与录音
 // 状态回执（course-helper:main:ucampus-recording-state，CONTRACTS §2）。
 
-const VOICE_RECORD_DURATION_MS = 3000; // 录音窗口时长
+// 录音窗口时长：2026-10-20 实测调优。题目原音约 4.6s，3 秒窗口会把音频截断在
+// 中途——腾讯 SOE 评测服务器收到不完整音频后返回 wrong sig（会话无效）。
+// 8 秒 = 完整播放一轮原音 + 评测往返余量；题与题之间由 acquire/v2 的次序保证互不干扰。
+const VOICE_RECORD_DURATION_MS = 8000;
 const VOICE_RECORD_GROUP_SELECTOR = ".record-button-group";
 // 真实结构（2026-10-20 快照）：录音按钮为 group 内 .record-button-wrap；
 // .question-audio（audio-origin 原音 / audio-replay 回放）是音频播放器，不是按钮。

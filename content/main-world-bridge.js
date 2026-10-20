@@ -1432,6 +1432,17 @@
   // 仅调用底层 MediaRecorder.stop() 不会清除平台的"正在录音中"状态——
   // 必须调平台自己的 stopRecord()（或 reset()）才会让前端认为录音结束。
   var platformRecorders = [];
+  // 腾讯云语音评测 SDK 实例（2026-10-20 CDP 实测：ucontent 语音题用 TencentSOE，
+  // 不是 Html5Recorder）。SOE.status：2=录音中。只有 status===2 时 stop() 才会上传评测。
+  var soeInstances = [];
+  function trackSoeInstance(instance) {
+    if (!instance) return;
+    for (var i = 0; i < soeInstances.length; i += 1) {
+      if (soeInstances[i] === instance) return;
+    }
+    soeInstances.push(instance);
+    while (soeInstances.length > 10) soeInstances.shift();
+  }
   function trackPlatformRecorder(instance) {
     if (!instance) return;
     for (var i = 0; i < platformRecorders.length; i += 1) {
@@ -1453,6 +1464,7 @@
       return true;
     }
     var OriginalCtor = RecorderCtor;
+    // 【方案 A】构造函数包装（仅当平台从 window 取构造函数时生效）
     function Html5RecorderProbe() {
       var instance = new OriginalCtor(...arguments);
       trackPlatformRecorder(instance);
@@ -1463,22 +1475,86 @@
       try { Html5RecorderProbe[key] = OriginalCtor[key]; } catch (ignoredCopyError) {}
     });
     Html5RecorderProbe.__courseHelperProbed = true;
+
+    // 【方案 B·关键】prototype 方法挂钩——平台即使保存了原构造函数引用，
+    // 实例方法仍走同一个 prototype。在 record() 时捕获 this（实例），
+    // 这样无论实例如何创建都能追踪到。实测平台录音器实例不在 React state 里，
+    // 只能靠方法调用时捕获。
+    var proto = OriginalCtor.prototype;
+    if (proto && typeof proto.record === 'function' && !proto.record.__courseHelperHooked) {
+      var originalRecord = proto.record;
+      proto.record = function probedRecord() {
+        try { trackPlatformRecorder(this); } catch (ignoredTrackError) {}
+        return originalRecord.apply(this, arguments);
+      };
+      proto.record.__courseHelperHooked = true;
+    }
+    if (proto && typeof proto.__startRecord === 'function' && !proto.__startRecord.__courseHelperHooked) {
+      var originalStart = proto.__startRecord;
+      proto.__startRecord = function probedStartRecord() {
+        try { trackPlatformRecorder(this); } catch (ignoredTrackError) {}
+        return originalStart.apply(this, arguments);
+      };
+      proto.__startRecord.__courseHelperHooked = true;
+    }
+
     try {
       globalWindow.Html5Recorder = Html5RecorderProbe;
-      console.log('[course-helper] MAIN bridge：已接管平台 Html5Recorder（可调 stopRecord 清除录音态）。');
+      console.log('[course-helper] MAIN bridge：已接管平台 Html5Recorder（构造函数 + prototype.record 双钩子）。');
       return true;
     } catch (ignoredAssignError) {
       return false;
     }
   }
 
+  // 腾讯云 SOE 接管：捕获实例 + 包装 start/stop 记录状态。
+  // 平台语音题流程：SOE.start() → 录音 → SOE.stop()（上传评测）。
+  // 我们用合成流录音时，平台自己的 SOE.status 仍为"录音中"，导致"正在录音中"提示。
+  function tryInstallSoeProbe() {
+    var SoeCtor = globalWindow.TencentSOE;
+    if (!SoeCtor || typeof SoeCtor !== 'function') {
+      return false;
+    }
+    if (SoeCtor.__courseHelperSoeProbed) {
+      return true;
+    }
+    var proto = SoeCtor.prototype;
+    if (proto) {
+      // 包装 start：捕获 this
+      if (typeof proto.start === 'function' && !proto.start.__courseHelperSoeHooked) {
+        var originalSoeStart = proto.start;
+        proto.start = function probedSoeStart() {
+          try { trackSoeInstance(this); } catch (ignoredTrackError) {}
+          return originalSoeStart.apply(this, arguments);
+        };
+        proto.start.__courseHelperSoeHooked = true;
+      }
+      // 包装 stop：捕获 this
+      if (typeof proto.stop === 'function' && !proto.stop.__courseHelperSoeHooked) {
+        var originalSoeStop = proto.stop;
+        proto.stop = function probedSoeStop() {
+          try { trackSoeInstance(this); } catch (ignoredTrackError) {}
+          return originalSoeStop.apply(this, arguments);
+        };
+        proto.stop.__courseHelperSoeHooked = true;
+      }
+    }
+    SoeCtor.__courseHelperSoeProbed = true;
+    console.log('[course-helper] MAIN bridge：已接管 TencentSOE（腾讯语音评测 SDK，可调 stop 清除录音态）。');
+    return true;
+  }
+
   function installPlatformRecorderProbe() {
     // 立即尝试 + 轮询（最多 60 秒，覆盖平台脚本加载延迟）
-    if (tryInstallPlatformRecorderProbe()) return;
+    var done = tryInstallPlatformRecorderProbe();
+    var soeDone = tryInstallSoeProbe();
+    if (done && soeDone) return;
     var attempts = 0;
     var timer = setInterval(function () {
       attempts += 1;
-      if (tryInstallPlatformRecorderProbe()) {
+      if (!done) done = tryInstallPlatformRecorderProbe();
+      if (!soeDone) soeDone = tryInstallSoeProbe();
+      if (done && soeDone) {
         clearInterval(timer);
         return;
       }
@@ -1509,22 +1585,106 @@
         }
       } catch (ignoredErr) {}
     }
-    // 1) 已追踪的实例
+    // 1) 已追踪的实例（SOE 优先）
+    for (var si = 0; si < soeInstances.length; si += 1) {
+      var soeInst = soeInstances[si];
+      if (!soeInst) continue;
+      try {
+        if (typeof soeInst.stop === 'function') {
+          soeInst.stop({});
+          stopped += 1;
+          console.log('[course-helper] MAIN bridge：兜底已调用 SOE.stop()（status=' + soeInst.status + '）。');
+        }
+      } catch (ignoredSoeErr) {}
+    }
     for (var i = 0; i < platformRecorders.length; i += 1) tryStop(platformRecorders[i], 'tracked');
-    // 2) window 一级属性
+    // 2) window 一级属性（含嵌套一层：组件常把实例挂在 obj.current / obj.instance）
     try {
       var keys = Object.keys(globalWindow);
       for (var k = 0; k < keys.length; k += 1) {
         var key = keys[k];
-        if (!/record|audio|media|voice/i.test(key)) continue;
-        tryStop(globalWindow[key], 'window.' + key);
+        if (!/record|audio|media|voice|ucomp|unipus/i.test(key)) continue;
+        var val = globalWindow[key];
+        tryStop(val, 'window.' + key);
+        if (val && typeof val === 'object') {
+          try {
+            var subKeys = Object.keys(val).slice(0, 30);
+            for (var sk = 0; sk < subKeys.length; sk += 1) {
+              tryStop(val[subKeys[sk]], 'window.' + key + '.' + subKeys[sk]);
+            }
+          } catch (ignoredSubError) {}
+        }
       }
     } catch (ignoredWindowErr) {}
+    // 3) 从 .ucomp-recorder 的 React fiber 里找实例（平台可能挂在 props/state）
+    try {
+      var doc = globalWindow.document;
+      var recEl = doc ? doc.querySelector('.ucomp-recorder') : null;
+      if (recEl) {
+        var fiberKey = null;
+        var elKeys = Object.keys(recEl);
+        for (var ek = 0; ek < elKeys.length; ek += 1) {
+          if (elKeys[ek].indexOf('__reactFiber') === 0 || elKeys[ek].indexOf('__reactInternalInstance') === 0) {
+            fiberKey = elKeys[ek];
+            break;
+          }
+        }
+        if (fiberKey) {
+          var fiber = recEl[fiberKey];
+          for (var fi = 0; fi < 25 && fiber; fi += 1) {
+            // memoizedProps 深挖
+            if (fiber.memoizedProps && typeof fiber.memoizedProps === 'object') {
+              try {
+                var pks = Object.keys(fiber.memoizedProps).slice(0, 20);
+                for (var pk = 0; pk < pks.length; pk += 1) {
+                  var pv = fiber.memoizedProps[pks[pk]];
+                  tryStop(pv, 'fiber.props.' + pks[pk]);
+                  if (pv && typeof pv === 'object' && pv.current) {
+                    tryStop(pv.current, 'fiber.props.' + pks[pk] + '.current');
+                  }
+                }
+              } catch (ignoredPropErr) {}
+            }
+            // memoizedState 链深挖
+            var st = fiber.memoizedState;
+            for (var si = 0; si < 10 && st; si += 1) {
+              var sv = st.memoizedState;
+              tryStop(sv, 'fiber.state.' + si);
+              if (sv && typeof sv === 'object' && sv.current) {
+                tryStop(sv.current, 'fiber.state.' + si + '.current');
+              }
+              st = st.next;
+            }
+            fiber = fiber.return;
+          }
+        }
+      }
+    } catch (ignoredFiberErr) {}
     return stopped;
   }
 
-  // content 侧停止命令：优先用平台 stopRecord()（清平台状态），再兜底 MediaRecorder.stop()。
+  // content 侧停止命令：优先调平台 TencentSOE.stop()（清平台"正在录音中"状态并触发评测上传），
+  // 再兜底 Html5Recorder.stopRecord()，最后 MediaRecorder.stop()。
   function handleStopRecordingCommand() {
+    // 【首选】腾讯 SOE.stop()：平台语音题的真实录音器。
+    // SOE.stop() 内部：检查 status===2（录音中）→ recorder.stop() → 上传音频到评测服务器
+    // → 回调评分 → 平台前端认为录音完成（可提交）。
+    var soeStopped = 0;
+    for (var s = 0; s < soeInstances.length; s += 1) {
+      var soe = soeInstances[s];
+      if (!soe) continue;
+      try {
+        if (typeof soe.stop === 'function') {
+          soe.stop({});
+          soeStopped += 1;
+          console.log('[course-helper] MAIN bridge：已调用平台 TencentSOE.stop()（第 ' +
+            (s + 1) + ' 个实例，status=' + soe.status + '）。');
+        }
+      } catch (ignoredSoeStopError) {
+        console.log('[course-helper] MAIN bridge：TencentSOE.stop() 失败：' +
+          (ignoredSoeStopError && ignoredSoeStopError.message ? ignoredSoeStopError.message : 'unknown'));
+      }
+    }
     var platformStopped = 0;
     for (var p = 0; p < platformRecorders.length; p += 1) {
       var inst = platformRecorders[p];
@@ -1555,8 +1715,9 @@
     // 兜底：平台脚本可能在 document_start 后加载，接管可能没成功——
     // 直接从 window 找 Html5Recorder 实例调 stopRecord。
     var forcedStopped = forceStopPlatformRecorders();
-    console.log('[course-helper] MAIN bridge：停止录音命令已执行（平台 stopRecord ' + platformStopped +
-      ' 个 / 兜底 stopRecord ' + forcedStopped + ' 个 / MediaRecorder.stop ' + stopped + ' 个）。');
+    console.log('[course-helper] MAIN bridge：停止录音命令已执行（SOE.stop ' + soeStopped +
+      ' 个 / 平台 stopRecord ' + platformStopped + ' 个 / 兜底 ' + forcedStopped +
+      ' 个 / MediaRecorder.stop ' + stopped + ' 个）。');
     emitRecordingState(false, liveRecorders.length, true);
   }
 

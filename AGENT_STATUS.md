@@ -251,3 +251,20 @@
   行号核对：32f9a92（14:23）版本 unipus.js 的 simulateVoiceRecordings 调用恰在 2059 行，
   与堆栈一致。ESM 模块缓存破坏（MODULE_CACHE_VERSION）仍然保留作为保险。
 - 回归 4 项全绿 + verify-live deaf 循环 ALL-PASS；已推送。
+
+## AGENT 37 真实平台 CDP 全面接管实测（2026-10-20 晚，用户默认 profile）
+
+- 接管方式：用户日常 Edge 以 --remote-debugging-port=9222 重启（默认 profile 保留登录态）；扩展重载后确认 v2026-10-20.11/.12 生效（edge://extensions 开发人员模式手动加载）。
+- **全链路实证打通（真实语音题页 ucontent.unipus.cn）**：
+  1. 点击 .button-record → 平台真实录音启动：zt.unipus.cn/soe/api/acquire/v2 返回 success（每录音位一个 JWT token，7/7 成功）。
+  2. 题目原音注入（真实人声 4.6s 循环）→ MediaRecorder 7 个全部构造+stop。
+  3. 腾讯 SOE 评测链路确认：wss://speech.unipus.cn/speech/proxy/wss 连通（页面需保持前台——bfcache 会冻结 WS）。
+- **平台源码逆向完成**（fetch chunk 源码分析）：
+  - 拦截点 common-*.js questionEventHandler：`if(this.isRecording()) return systemInfo("正在录音中")`。
+  - isRecording 定义 question-common-*.js@279278：`BD1.getInstance()?.isRecording || a2V()?.isRecording`。
+  - 录音组件（question-common@11461）：recordStop/handleRecord/cancelRecord/forceCancelPending；state={recording,progress,isHandleEnd}。
+  - kt 实例（recorder fiber d33）props 持 startRecord/stopRecord/isRecording 注入。
+- **残余卡点（content script 能力边界）**：BD1 录音管理单例在 webpack 模块闭包内（window 不可达）。已试并无效：组件 recordStop/recordAutoEnd dispatch、state.recording 清零、kt props.isRecording monkey-patch、TencentSOE/Html5Recorder prototype 双钩子（实例闭包持有，钩子不触发）。提交时 questionEventHandler 闭包内 this.isRecording() 仍 true。
+- 8 秒录音窗口（v20261020.12）曾使错误从"正在录音中"变为"未找到语音引擎信息"+wrong sig（3 秒窗口音频被截断）。
+- **彻底解法（下一步）**：declarativeNetRequest 改写 common-*.js 响应体，在 BD1 类定义处注入 hook（isRecording 强制 false 或 stopRecord 透传）。
+- 版本推进至 v2026-10-20.12；今日 6 层突破全部推送 GitHub。
