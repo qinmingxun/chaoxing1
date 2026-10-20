@@ -268,3 +268,15 @@
 - 8 秒录音窗口（v20261020.12）曾使错误从"正在录音中"变为"未找到语音引擎信息"+wrong sig（3 秒窗口音频被截断）。
 - **彻底解法（下一步）**：declarativeNetRequest 改写 common-*.js 响应体，在 BD1 类定义处注入 hook（isRecording 强制 false 或 stopRecord 透传）。
 - 版本推进至 v2026-10-20.12；今日 6 层突破全部推送 GitHub。
+
+## AGENT 38 语音题拦截彻底突破——chunk 源码改写（2026-10-20 深夜，7789122）
+
+- **最终方案落地并实测通过**：bridge（document_start）以 MutationObserver 监听平台 chunk `<script>` 注入，在执行前 fetch 源码并在 `"isRecording",value:function(){` 处注入全局开关短路 `if(window.__CH_FORCE_NOT_RECORDING__===true){return false}`，经 Blob URL 执行（带 new Function 语法自检，失败回退原脚本防平台瘫痪）。停止录音命令（ucampus-stop-recording）激活开关。
+- **实测结果（真实登录态 Edge，v2026-10-20.14/.15）**：
+  1. chunk 改写成功（长度 426264，语法自检通过）；
+  2. 7 个录音位全部点击→MediaRecorder 构造+停止→开关激活 7 次；
+  3. 点"下一题"后**全程无"正在录音中"提示**（拦截彻底解除）；
+  4. 页面成功翻到普通题（recorders 7→5，题目文本切换，页脚变"提 交"）；
+  5. "提 交"点击触发平台正常业务校验："还有19道题没有作答"（语音题占位跳过的预期行为，非拦截）。
+- 附带修复：提交/翻页按钮文本匹配压缩空白（"提 交"含全角空格此前不命中）。
+- 剩余为流程编排优化（语音题页逐子题点"下一题"使 19 题均有作答记录），非技术阻塞。
