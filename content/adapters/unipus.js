@@ -2274,6 +2274,7 @@ const VOICE_RECORD_BUTTON_SELECTOR = ".ucomp-recorder .button-record";
 // 兼容旧结构/兜底：仅含 ucomp-recorder 的 wrap（排除播放器）
 const VOICE_RECORDER_WRAP_SELECTOR = ".record-button-wrap .ucomp-recorder";
 const VOICE_STOP_VERIFY_DELAY_MS = 600; // 停止点击后的验证等待（React 状态切换）
+const VOICE_NEXT_QUESTION_SETTLE_MS = 2500; // 点"下一题"后新题渲染等待（React+数据加载）
 
 // 组内"停止"目标（录音态）：取【最深】命中——React 录音组件的原生监听常绑在
 // 文本叶子/图标层，点外层 wrapper 事件不经过深层元素。伪元素渲染文本（css
@@ -2779,7 +2780,38 @@ function detectRecordingActive(context) {
   return false;
 }
 
+// 找下一个未完成的练习组 tab（2026-10-20 实测结构：.pc-task，父容器
+// .pc-header-tasks-row，激活态 class 含 pc-header-task-activity）。
+// 返回第一个【非激活】的 tab；全部完成返回 null。
+function findNextPracticeTab(doc) {
+  if (!doc || typeof doc.querySelectorAll !== "function") return null;
+  for (const tab of safeQueryAll(doc, ".pc-task")) {
+    const cls = asString(tab.className);
+    if (/pc-header-task-activity/.test(cls)) continue;
+    const text = asString(tab.textContent).replace(/\s+/g, "").trim();
+    if (!/Practice/i.test(text)) continue;
+    if (!isElementVisible(tab)) continue;
+    return tab;
+  }
+  return null;
+}
+
+let voiceLoopRunning = false;
+
 async function simulateVoiceRecordings(context) {
+  if (voiceLoopRunning) {
+    unipusLog(context, "u校园语音题：逐题循环已在运行，跳过本次重入。");
+    return true;
+  }
+  voiceLoopRunning = true;
+  try {
+    await simulateVoiceRecordingsInner(context);
+  } finally {
+    voiceLoopRunning = false;
+  }
+}
+
+async function simulateVoiceRecordingsInner(context) {
   const doc = getContextDocument(context);
   // 版本标记（诊断用：一眼确认跑的是哪版代码，避免"改了但跑旧版"）
   unipusLog(context, "u校园语音题：模块版本 v2026-10-20.7（ucomp-recorder 录音按钮 + 开关式停止）");
@@ -2818,27 +2850,63 @@ async function simulateVoiceRecordings(context) {
     return true;
   }
 
-  // ---- 场景 B：需要手动点开始录音（旧结构 .record-button-group）----
+  // ---- 场景 B：逐题循环（2026-10-20 实测平台语义修正）----
+  // 一页含多道语音题（实测 19 道）：每题流程 = 点当前录音位 → 录音窗口 → 停止
+  // （开关激活）→ 点页脚"下一题" → 新题渲染 → 继续；页脚变"提 交"时结束，
+  // 由外层 scheduleAutoSubmit 完成整页提交（19 题作答记录齐全，校验通过）。
+  // 旧逻辑一次点完全页录音位再点一次下一题——实测跳题，平台报
+  // "还有19道题没有作答"（7789122 版本实测教训）。
   const count = initialButtons.length;
+  const maxQuestions = Math.max(count * 3, 25); // 上限保护（一页题数未知，按 3 倍录音位+25 兜底）
   unipusLog(context,
-    `u校园语音题：模拟录音 ${count} 处（逐题：开始 → ${VOICE_RECORD_DURATION_MS}ms → 停止；` +
-    "每次点击前实时查询按钮，防止 React 重渲染替换节点后旧引用失效）。");
-  for (let index = 0; index < count; index += 1) {
+    `u校园语音题：逐题循环开始（当前可见录音位 ${count} 个；每题：录音 ${VOICE_RECORD_DURATION_MS}ms → 停止 → 下一题，直到页脚出现"提 交"）。`);
+  let questionIndex = 0;
+  for (; questionIndex < maxQuestions; questionIndex += 1) {
+    // 每轮实时查询录音位（切题后 React 重渲染，旧引用失效）
     const startButtons = collectRecordButtons(doc);
-    if (index >= startButtons.length) {
-      unipusWarn(context, `u校园语音题：第 ${index + 1} 个录音按钮未找到（可能被重渲染移除），跳过。`);
-      continue;
+    if (!startButtons.length) {
+      unipusLog(context, `u校园语音题：第 ${questionIndex + 1} 题无可见录音位（可能全部完成），结束循环。`);
+      break;
     }
-    const clickTarget = startButtons[index];
+    // 只点当前（第一个）录音位——其余是后续题的
+    const clickTarget = startButtons[0];
     const clickOk = clickRecordTarget(context, clickTarget);
     unipusLog(context,
-      `u校园语音题：第 ${index + 1} 处开始录音点击${clickOk ? "已派发" : "失败"}，目标 ${describeElement(clickTarget)}。`);
+      `u校园语音题：第 ${questionIndex + 1} 题开始录音点击${clickOk ? "已派发" : "失败"}，目标 ${describeElement(clickTarget)}。`);
     await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
-    snapshotRecordingDom(context);
-    const outcome = await tryStopRecording(context, index);
+    const outcome = await tryStopRecording(context, 0);
     if (outcome === "none") {
-      unipusWarn(context, `u校园语音题：第 ${index + 1} 处录音停止未确认，继续下一处。`);
+      unipusWarn(context, `u校园语音题：第 ${questionIndex + 1} 题录音停止未确认。`);
     }
+    // 页脚还有"下一题"？→ 组内切题
+    const nextLink = doc ? findFootLinkByText(doc, /下一题/) : null;
+    if (nextLink) {
+      if (clickWithPointerSequence(context, nextLink)) {
+        unipusLog(context, `u校园语音题：已点击"下一题"，等待第 ${questionIndex + 2} 题渲染。`);
+      } else {
+        unipusWarn(context, `u校园语音题："下一题"点击失败。`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, VOICE_NEXT_QUESTION_SETTLE_MS));
+      continue;
+    }
+    // 无"下一题"：找下一个未完成的 Practice tab（.pc-task，非激活可点击）→ 切组
+    const nextTab = findNextPracticeTab(doc);
+    if (nextTab) {
+      unipusLog(context,
+        `u校园语音题：组内题完成，切换下一个练习组（${describeElement(nextTab)}）。`);
+      if (clickWithPointerSequence(context, nextTab)) {
+        await new Promise((resolve) => setTimeout(resolve, VOICE_NEXT_QUESTION_SETTLE_MS));
+        continue;
+      }
+      unipusWarn(context, "u校园语音题：练习组 tab 点击失败。");
+    }
+    // 既无"下一题"也无未完成 tab：整页语音题完成
+    unipusLog(context,
+      `u校园语音题：第 ${questionIndex + 1} 题完成，无"下一题"且无未完成练习组（整页语音题处理完毕，共 ${questionIndex + 1} 题）。`);
+    break;
+  }
+  if (questionIndex >= maxQuestions) {
+    unipusWarn(context, `u校园语音题：达到循环上限 ${maxQuestions} 题，停止（防死循环）。`);
   }
   return true;
 }

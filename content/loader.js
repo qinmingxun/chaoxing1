@@ -190,7 +190,7 @@
   // 缓存，扩展"重新加载"后 content script 仍可能拿到旧模块（实测：loader.js 更新生效、
   // unipus.js 仍是旧版，语音题探测日志完全不出现）。给模块 URL 加版本参数，
   // 版本变化即强制重新拉取。改 unipus.js/bridge/quiz-solver 等模块后递增。
-  const MODULE_CACHE_VERSION = '20261020.15';
+  const MODULE_CACHE_VERSION = '20261020.18';
   function getModuleSpecifier(relativePath) {
     const runtime = getRuntime();
     const base = (runtime && typeof runtime.getURL === 'function')
@@ -488,7 +488,7 @@
     // 避免"改了代码但浏览器跑的是旧版"的排查浪费。修改 unipus.js/bridge 后递增。
     // 同时写入 DOM 属性：控制台执行 document.documentElement.dataset.courseHelperVersion
     // 即可秒查当前运行版本（页面可见/可查，不依赖日志滚动）。
-    const ADAPTER_VERSION = 'v2026-10-20.15（提交按钮空格兼容）';
+    const ADAPTER_VERSION = 'v2026-10-20.18（Practice 组切换）';
     try {
       console.log('[course-helper] [course-helper] 扩展已加载：' + adapterEntry.name +
         ' 适配器 ' + ADAPTER_VERSION);
