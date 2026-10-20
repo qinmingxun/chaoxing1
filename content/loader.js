@@ -186,14 +186,21 @@
     return ROUTES.find((route) => route.test.test(normalizedPath)) || null;
   }
 
+  // 模块缓存破坏（2026-10-20 关键修复）：chrome-extension:// 的 ESM import 会被浏览器
+  // 缓存，扩展"重新加载"后 content script 仍可能拿到旧模块（实测：loader.js 更新生效、
+  // unipus.js 仍是旧版，语音题探测日志完全不出现）。给模块 URL 加版本参数，
+  // 版本变化即强制重新拉取。改 unipus.js/bridge/quiz-solver 等模块后递增。
+  const MODULE_CACHE_VERSION = '20261020.5';
   function getModuleSpecifier(relativePath) {
     const runtime = getRuntime();
-    if (runtime && typeof runtime.getURL === 'function') {
-      return runtime.getURL(relativePath);
+    const base = (runtime && typeof runtime.getURL === 'function')
+      ? runtime.getURL(relativePath)
+      : relativePath;
+    try {
+      return base + (base.indexOf('?') === -1 ? '?' : '&') + 'v=' + MODULE_CACHE_VERSION;
+    } catch (_error) {
+      return base;
     }
-    // In test pages or an already module-loaded content script, a relative URL
-    // can still be resolved without making the loader depend on runtime APIs.
-    return relativePath;
   }
 
   async function loadAdapter(entry) {
@@ -481,7 +488,7 @@
     // 避免"改了代码但浏览器跑的是旧版"的排查浪费。修改 unipus.js/bridge 后递增。
     // 同时写入 DOM 属性：控制台执行 document.documentElement.dataset.courseHelperVersion
     // 即可秒查当前运行版本（页面可见/可查，不依赖日志滚动）。
-    const ADAPTER_VERSION = 'v2026-10-20.4（语音题自动录音+全页控件dump）';
+    const ADAPTER_VERSION = 'v2026-10-20.5（模块缓存破坏+自动录音探测）';
     try {
       console.log('[course-helper] [course-helper] 扩展已加载：' + adapterEntry.name +
         ' 适配器 ' + ADAPTER_VERSION);

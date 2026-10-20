@@ -1922,6 +1922,18 @@ export async function runAutoAnswer(ctx) {
     solvableQuestions.push(question);
   });
   const hasVoiceQuestions = solvableQuestions.length < questions.length;
+  // 题目类型诊断（2026-10-20）：打印每题 qtype/isVoice，确认语音题被正确识别
+  // （真实平台 replyType 未核对，若语音题未被识别会误送 DeepSeek 且录音流程不触发）。
+  try {
+    unipusLog(context,
+      `u校园题目类型诊断（${questions.length} 道）：` +
+      questions.map((question, index) => {
+        const qtype = question && question.qtype;
+        const voice = question && question.__isVoice === true;
+        const stem = asString(question && question.stem).replace(/\s+/g, " ").slice(0, 18);
+        return `#${index + 1} qtype=${qtype}${voice ? "(语音)" : ""} stem="${stem}"`;
+      }).join(" | "));
+  } catch (_error) { /* 诊断日志失败不影响流程 */ }
 
   let summary = null;
   try {
