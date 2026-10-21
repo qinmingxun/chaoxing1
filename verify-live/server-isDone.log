@@ -1,0 +1,7 @@
+[server] listening on https://u.unipus.cn:9445 (v2 two-page cycle)
+[server] quiz page 1 fetched (total 1)
+[server] SUBMIT page 1: usedTime=69 ques=1 answers=["{\"value\":[\"\"],\"isDone\":true}"]
+[server] quiz page 2 fetched (total 2)
+[server] DeepSeek mock: qtype=3 -> B
+[server] DeepSeek mock: qtype=2 -> blue
+[server] SUBMIT page 2: usedTime=95 ques=2 answers=["{\"value\":[\"B\"],\"isDone\":true}","{\"value\":[\"\"],\"children\":[{\"value\":[\"blue\"],\"isDone\":true}],\"isDone\":true}"]

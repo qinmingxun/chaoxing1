@@ -213,7 +213,35 @@
       "evidence": "node --check; video-manager-contract-ok"
     }
   },
-  "next": null,
-  "blocked": [],
-  "last_updated": "2026-10-18T04:37:16.373Z"
+  "next": [
+    "P0 真机验证（待用户配 Key）：平台「还有 N 道题没有作答」是否降为 0 —— isDone 注入已离线验证通过（v56）",
+    "P1：下拉题支持（.ant-select / .ant-dropdown-trigger / li.select-option）",
+    "P1：排序/拖拽题支持（#sortableListWrapper + Touch 事件序列；普通版 sequence-pc-card--item）",
+    "P1：itest 混合题型（qindex 属性的 radio + blankinput）",
+    "P2：章节跳过清单（SkipManager）、刷新后自动恢复挂机、页内 toast + 进度浮窗",
+    "P3：英音/美音选择、录音时长与延迟可调",
+    "题库：本环境未找到可用资源（web_search 无 Key、GitHub 隧道仅 git 协议）；若用户提供 txt/json，按 uNgM + 子章节格式实现导入匹配"
+  ],
+  "blocked": [
+    "P0 真机验证需要用户在页内面板配置 DeepSeek API Key（否则选择题/填空题无答案可注入）"
+  ],
+  "last_updated": "2026-10-21T14:07:42.389Z",
+  "current_version": "v2026-10-20.56",
+  "handoff_2026_10_21": {
+    "summary": "u校园 AI 版整课自动化闭环 + 页内控制面板 + 视频倍速 + P0 isDone 作答标记 全部落地并推送（HEAD 6a78b15）",
+    "key_files": [
+      "AGENTS.md（权威指令：仓库约定/推送方式/调试接管）",
+      "MEMORY.md（跨会话记忆：一行一条，先读）",
+      "AGENT_STATUS.md（AGENT 37-50 的实测记录与踩坑）",
+      "content/main-world-bridge.js（MAIN world：chunk 改写破 isRecording、虚拟麦克风、提交注入 isDone、弹窗只点确定）",
+      "content/adapters/unipus.js（语音逐题循环、空闲看门狗、目录推进、视频策略、页内面板、API Key 输入）",
+      "content/loader.js（ADAPTER_VERSION / MODULE_CACHE_VERSION 版本号）",
+      "content/keep-alive.js（点 antd「我知道了」）",
+      "verify-live/（离线验证台：mock DeepSeek + /__teststate 含 lastAnswers）"
+    ],
+    "verify_commands": [
+      "node --check content/loader.js && node --check content/main-world-bridge.js && node --check content/adapters/unipus.js",
+      "cd verify-live && node server.mjs   # 然后另开终端 node run-test.mjs normal → 期望 ALL-PASS"
+    ]
+  }
 }
