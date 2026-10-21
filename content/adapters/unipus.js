@@ -2281,7 +2281,12 @@ const VOICE_NEXT_QUESTION_SETTLE_MS = 2500; // 点"下一题"后新题渲染等�
 // .score_layout / .practice-score .score / .oral-score）。不等分数就点"下一题"
 // 会导致该题被记为未作答——正是"还有 N 道题没有作答"的根因。
 // 停止后轮询评分元素（最多 VOICE_SCORE_WAIT_MS），出现即作答已登记。
-const VOICE_SCORE_WAIT_MS = 15000;
+// 2026-10-21 真实平台三轮实测（等评分时长 → 平台"未作答"计数）：
+//   15s/题 → 0 道未作答（v28，约170s/页）；5s/题 → 4 道未作答（v29，116s）；
+//   5s/题 + 提交前统一等15s → 仍 4 道未作答（v30，131s）——证明起作用的是
+//   【每题离开前的等待】（登记在切题前完成），而非总时长。本版取 10s 折中。
+// 若 10s 仍出现未作答，请回调至 15s（v28 已验证 0 未作答）。
+const VOICE_SCORE_WAIT_MS = 10000;
 const VOICE_SCORE_SELECTORS = [".score_layout", ".practice-score .score", ".score-wrapper .score", ".oral-score"];
 
 function readRecordedScore(doc) {
@@ -2305,7 +2310,7 @@ function waitForVoiceScore(context) {
         return;
       }
       if (Date.now() - startedAt >= VOICE_SCORE_WAIT_MS) {
-        unipusLog(context, "u校园语音题：评分等待超时（15s），继续推进（可能不影响作答登记）。");
+        unipusLog(context, "u校园语音题：评分等待超时（${Math.round(VOICE_SCORE_WAIT_MS / 1000)}s），继续推进（可能不影响作答登记）。");
         resolve(false);
         return;
       }
