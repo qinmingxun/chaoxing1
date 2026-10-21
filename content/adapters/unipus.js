@@ -3241,7 +3241,9 @@ function clickSubmitButton(context) {
 const AUTO_CONTINUE_FIRST_DELAY_MS = 1000;
 const AUTO_CONTINUE_POLL_MS = 500;
 const AUTO_CONTINUE_TIMEOUT_MS = 60 * 1000;
-const autoContinueState = { timer: null, deadline: 0, clicked: false };
+const autoContinueState = { timer: null, deadline: 0, clicked: false, startedAt: 0, tocTried: false };
+// 页脚无按钮持续这么久后，改走"左侧目录下一节"（见 findNextTocItem）。
+const TOC_ADVANCE_AFTER_MS = 8000;
 
 function resetAutoContinueState() {
   if (autoContinueState.timer) {
@@ -3250,6 +3252,25 @@ function resetAutoContinueState() {
   }
   autoContinueState.deadline = 0;
   autoContinueState.clicked = false;
+}
+
+// ---- 目录推进（2026-10-21 真实平台实测补缺口）----
+// 场景：某些节（如 6-3 Listening 导语页）页脚为空（#pc-foot 内无 a），也没有题目，
+// 提交后无"继续学习/下一题"可点 → 自动流程停滞。此时改点【左侧微课菜单的下一个条目】。
+// 结构（实测）：左侧 [data-role="micro"]（class pc-slider-menu-micro），
+// 当前激活项 class 含 pc-menu-activity；下一项即要进入的节。
+function findNextTocItem(doc) {
+  if (!doc || typeof doc.querySelectorAll !== "function") return null;
+  const items = safeQueryAll(doc, '[data-role="micro"]');
+  if (!items.length) return null;
+  let activeIndex = -1;
+  for (let i = 0; i < items.length; i += 1) {
+    if (/pc-menu-activity/.test(asString(items[i].className))) { activeIndex = i; break; }
+  }
+  if (activeIndex < 0 || activeIndex + 1 >= items.length) return null;
+  const next = items[activeIndex + 1];
+  if (!next || !isElementVisible(next)) return null;
+  return next;
 }
 
 // 在页脚候选（用户实测 selector）中按文本/伪元素文本查找链接。
@@ -3273,6 +3294,7 @@ function findFootLinkByText(doc, pattern) {
 
 function scheduleAutoContinue(context) {
   resetAutoContinueState();
+  autoContinueState.startedAt = Date.now();
   autoContinueState.deadline = Date.now() + AUTO_CONTINUE_TIMEOUT_MS;
   autoContinueState.timer = setTimeout(() => pollAutoContinue(context), AUTO_CONTINUE_FIRST_DELAY_MS);
 }
@@ -3295,11 +3317,135 @@ function pollAutoContinue(context) {
     }
     return;
   }
+  // 页脚长时间无按钮（如导语页）→ 尝试点左侧目录的下一节（只试一次）。
+  if (!autoContinueState.tocTried &&
+      autoContinueState.startedAt &&
+      Date.now() - autoContinueState.startedAt >= TOC_ADVANCE_AFTER_MS) {
+    autoContinueState.tocTried = true;
+    const nextToc = findNextTocItem(doc);
+    if (nextToc) {
+      if (clickWithPointerSequence(context, nextToc)) {
+        autoContinueState.clicked = true;
+        unipusLog(context,
+          `u校园自动翻页：页脚无按钮，改点左侧目录下一节（${describeElement(nextToc)}），等待新节内容。`);
+        return;
+      }
+      unipusWarn(context, "u校园自动翻页：目录下一节点击失败。");
+    } else {
+      unipusLog(context, "u校园自动翻页：页脚无按钮且目录中无下一节（可能已是最后一节）。");
+    }
+  }
   if (Date.now() >= autoContinueState.deadline) {
     unipusWarn(context, "u校园自动翻页：60 秒内未出现“继续学习/下一题”按钮，已停止等待（可手动点击继续）。");
     return;
   }
   autoContinueState.timer = setTimeout(() => pollAutoContinue(context), AUTO_CONTINUE_POLL_MS);
+}
+
+// ---- 空闲看门狗（2026-10-21 真实平台实测补缺口）----
+// 问题：自动翻页轮询在点击"继续学习"后就结束了；若下一节是导语页（无题目、页脚为空，
+// 如 6-3 Listening），没有任何事件接手 → 整课循环停滞。
+// 方案：常驻看门狗每 5s 检查；页面【完全无交互内容】且空闲 ≥ IDLE_ADVANCE_MS 时，
+// 点左侧目录的下一节推进（每页只推一次，防抖）。
+// "有交互内容"包括：录音位、题目容器/选项/输入框、页脚按钮、音视频、iframe、textarea
+// ——出现任意一种都视为正常页面，不推进（避免误跳过视频/听力页）。
+const IDLE_ADVANCE_MS = 12000;
+// 卡死逃生：页面【有题目】但适配器长时间没有任何动作（题型未覆盖、题目数据未到达等）
+// → 兜底点页脚"提交/下一题"推进，避免整课循环永久死锁（实测：6-4 Viewing 有 2 道
+// textarea 题但适配器"未获取到任何题目"）。阈值取大一些，避免抢在数据到达前误提交。
+const STUCK_ESCAPE_MS = 60000;
+const IDLE_WATCH_INTERVAL_MS = 5000;
+const idleWatchState = { timer: null, lastActivityAt: 0, advancedHash: "" };
+
+function unipusPageSignature(context) {
+  try {
+    const view = getContextWindow(context);
+    return String(view && view.location ? view.location.hash : "") || "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function unipusHasInteractiveContent(doc) {
+  if (!doc || typeof doc.querySelectorAll !== "function") return true; // 无法判定时不推进
+  // 1) 题目/录音类容器：命中即视为"有内容"（这些是真正需要作答的）。
+  const containerSelectors = [
+    VOICE_RECORD_BUTTON_SELECTOR,
+    ".ucomp-recorder",
+    ".question-common-abs-reply",
+    ".question-common-abs-banked-cloze",
+    ".fe-scoop",
+    ".option.isNotReview",
+  ];
+  for (const selector of containerSelectors) {
+    if (safeQueryAll(doc, selector).length) return true;
+  }
+  // 2) 输入类：排除页头/导航/搜索框（2026-10-21 实测：页面有 1 个搜索框，
+  //    若一并计入会导致"永远有内容"，看门狗永不触发）。
+  const inputSelector = 'textarea, input[type="text"], input[type="radio"], input[type="checkbox"]';
+  for (const element of safeQueryAll(doc, inputSelector)) {
+    try {
+      if (element.closest && element.closest('header, nav, [class*="search"], [class*="header"], [class*="navbar"]')) continue;
+    } catch (_closestError) { /* closest 不可用时按内容处理 */ }
+    return true;
+  }
+  // 注意：这里【不】把页脚按钮算作"有内容"——否则导语页（页脚有"提交"但无题目）
+  // 会永远判定为"有内容"，看门狗无法触发空闲推进（2026-10-21 实测：6-4 Viewing 卡住）。
+  // 页脚按钮由看门狗的空闲分支处理（空闲到时点它）。
+  return false;
+}
+
+function startUnipusIdleWatcher(context) {
+  if (idleWatchState.timer) return;
+  idleWatchState.lastActivityAt = Date.now();
+  idleWatchState.timer = setInterval(() => {
+    try {
+      const doc = getContextDocument(context);
+      if (!doc) return;
+      const hash = unipusPageSignature(context);
+      // "有人在干活"：答题求解中 / 语音逐题循环中 → 视为活跃，重置空闲计时。
+      const busy = Boolean(autoAnswerState && autoAnswerState.running) || voiceLoopRunning === true;
+      if (busy) {
+        idleWatchState.lastActivityAt = Date.now();
+        return;
+      }
+      const hasContent = unipusHasInteractiveContent(doc);
+      const idleMs = Date.now() - idleWatchState.lastActivityAt;
+      // 有题目但无人处理 → 用更保守的卡死逃生阈值；无内容 → 用普通空闲阈值。
+      const threshold = hasContent ? STUCK_ESCAPE_MS : IDLE_ADVANCE_MS;
+      if (idleMs < threshold) return;
+      if (idleWatchState.advancedHash === hash) return; // 每页只推一次
+      // 情况 A：无题目但页脚有按钮（实测 6-4 Viewing 导语页：页脚有"提交"却无可答题目）
+      // ——直接点它推进；否则会卡住（看门狗因"有可见按钮"不推进，自动提交又因"无题目"不触发）。
+      const footAction = findFootLinkByText(doc, /提交|下一题|继续学习/);
+      if (footAction) {
+        idleWatchState.advancedHash = hash;
+        if (clickWithPointerSequence(context, footAction)) {
+          unipusLog(context,
+            `u校园空闲推进：页面无适配器可处理的动作（题题型未覆盖或已作答）且空闲 ${Math.round(idleMs / 1000)}s，点击页脚按钮推进（${describeElement(footAction)}）。`);
+        }
+        return;
+      }
+      // 情况 B：页脚为空 → 点左侧目录的下一节。
+      const nextToc = findNextTocItem(doc);
+      if (!nextToc) {
+        idleWatchState.advancedHash = hash; // 已是最后一节，不再重复尝试
+        return;
+      }
+      idleWatchState.advancedHash = hash;
+      if (clickWithPointerSequence(context, nextToc)) {
+        unipusLog(context,
+          `u校园目录推进：当前页无题目/按钮且空闲 ${Math.round(idleMs / 1000)}s，自动进入下一节（${describeElement(nextToc)}）。`);
+      }
+    } catch (_watchError) { /* 看门狗异常不影响主流程 */ }
+  }, IDLE_WATCH_INTERVAL_MS);
+}
+
+function stopUnipusIdleWatcher() {
+  if (idleWatchState.timer) {
+    clearInterval(idleWatchState.timer);
+    idleWatchState.timer = null;
+  }
 }
 
 // ==== END SECTION: unipus-auto-submit ====
@@ -3632,6 +3778,9 @@ export async function init(ctx) {
   // 题目数据事件（handleQuestionDataPayload → triggerAutoAnswerOnce）驱动重试。
   void triggerAutoAnswerOnce();
 
+  // 空闲看门狗：页面无任何交互内容时自动经目录推进到下一节（补整课循环）。
+  startUnipusIdleWatcher(activeContext);
+
   // 保活（loader 已全局启动三平台统一保活；此处为 unipus 侧幂等接线）
   keepAliveStop = startKeepAlive(doc);
 
@@ -3652,6 +3801,9 @@ export function destroy() {
 
   // 停止自动翻页轮询（"继续学习"等待清理）
   resetAutoContinueState();
+
+  // 停止空闲看门狗（目录推进）
+  stopUnipusIdleWatcher();
 
   // 移除 window "message" 监听
   removeQuestionMessageListener();
