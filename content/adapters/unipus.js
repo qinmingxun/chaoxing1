@@ -3515,6 +3515,8 @@ function startUnipusIdleWatcher(context) {
     try {
       const doc = getContextDocument(context);
       if (!doc) return;
+      // 全局"停止刷课"时看门狗完全不动页面（仅保持巡检）。
+      if (unipusSweepEnabled !== true) return;
       const hash = unipusPageSignature(context);
       // 页面状态变化（含页脚按钮变化）→ 重置空闲预算，给新页面充分时间渲染题目，
       // 避免"上一页已积攒的空闲时间"让看门狗在新页题目出现前就急着点提交
@@ -3679,6 +3681,91 @@ function dispatchWakeEvent(doc) {
 
 // ==== END SECTION: unipus-keep-alive ====
 
+// ==== SECTION: unipus-video ====
+// ---- 视频自动播放 + 倍速（2026-10-21 用户需求；参考 chaoxing/zhihuishu 的自包含实现）----
+// 行为：接管页面所有 <video>（含后插入的）——尝试自动播放并设置倍速；
+// 自动播放被浏览器策略拒绝时，自动转为静音重试（保留可听场景：先带声试，失败才静音）。
+// 倍速来源：ctx.settings.videoSpeed（1–8 钳制），默认 2。
+const UNIPUS_VIDEO_DEFAULT_RATE = 3; // 与 loader settings 默认 videoSpeed=3 对齐
+const UNIPUS_VIDEO_POLL_MS = 2000;
+let unipusVideoTimer = null;
+// 是否允许整课自动化（面板"开始/停止刷课"与 chrome.storage.local.autoAnswer 同步）。
+let unipusSweepEnabled = true;
+
+function readUnipusVideoRate(context) {
+  const configured = Number(context && context.settings && context.settings.videoSpeed);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.min(Math.max(configured, 1), 8);
+  }
+  return UNIPUS_VIDEO_DEFAULT_RATE;
+}
+
+function applyUnipusVideoPolicy(context) {
+  if (unipusSweepEnabled !== true) return;
+  const doc = getContextDocument(context);
+  if (!doc || typeof doc.querySelectorAll !== "function") return;
+  const rate = readUnipusVideoRate(context);
+  let videos = [];
+  try {
+    videos = Array.prototype.slice.call(doc.querySelectorAll("video"));
+  } catch (_queryError) {
+    return;
+  }
+  for (const video of videos) {
+    try {
+      if (video.__chVideoHandled !== true) {
+        video.__chVideoHandled = true;
+        // 倍速保持：平台或用户改动后拉回（避免被重置为 1x）。
+        video.addEventListener("ratechange", () => {
+          try {
+            if (Math.abs(video.playbackRate - readUnipusVideoRate(context)) > 0.01) {
+              video.playbackRate = readUnipusVideoRate(context);
+            }
+          } catch (_rateError) { /* 只读媒体对象忽略 */ }
+        });
+        video.addEventListener("play", () => {
+          try { video.playbackRate = readUnipusVideoRate(context); } catch (_playError) {}
+        });
+        unipusLog(context, `u校园视频：已接管视频元素（目标倍速 ${rate}x，尝试静音自动播放）。`);
+      }
+      if (Math.abs(video.playbackRate - rate) > 0.01) {
+        video.playbackRate = rate;
+      }
+      if (video.paused && !video.ended && video.readyState >= 2) {
+        const playPromise = video.play();
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch(() => {
+            // 自动播放被拒（需用户手势）→ 静音后重试（静音始终允许自动播放）。
+            try {
+              video.muted = true;
+              video.volume = 0;
+              const retry = video.play();
+              if (retry && typeof retry.catch === "function") retry.catch(() => {});
+            } catch (_muteError) { /* 忽略 */ }
+          });
+        }
+      }
+    } catch (_videoError) { /* 单个视频异常不影响其它 */ }
+  }
+}
+
+function startUnipusVideoPolicy(context) {
+  if (unipusVideoTimer) return;
+  applyUnipusVideoPolicy(context);
+  unipusVideoTimer = setInterval(() => applyUnipusVideoPolicy(context), UNIPUS_VIDEO_POLL_MS);
+  unipusLog(context,
+    `u校园视频：自动播放 + 倍速已启动（当前倍速 ${readUnipusVideoRate(context)}x，每 ${UNIPUS_VIDEO_POLL_MS / 1000}s 巡检）。`);
+}
+
+function stopUnipusVideoPolicy() {
+  if (unipusVideoTimer) {
+    clearInterval(unipusVideoTimer);
+    unipusVideoTimer = null;
+  }
+}
+
+// ==== END SECTION: unipus-video ====
+
 // ==== SECTION: unipus-ui ====
 // ---- 控制面板 UI（2026-10-20 参考 wenliu 深色主题设计）----
 // 功能：挂机总开关（暂停/恢复逐题循环）、语音设置（录音窗口缓冲/评分等待开关）、
@@ -3752,6 +3839,11 @@ function buildUnipusUi() {
     ".ch-log-warn{color:#fbbf24}",
     "#ch-ball{position:fixed;left:16px;bottom:16px;z-index:2147483000;width:42px;height:42px;border-radius:50%;background:#0f1420;color:#38bdf8;border:1px solid rgba(255,255,255,.14);display:none;align-items:center;justify-content:center;cursor:pointer;font-size:17px;box-shadow:0 4px 18px rgba(0,0,0,.5)}",
     "#ch-ball:hover{border-color:#38bdf8}",
+    ".ch-status{font-size:11px;line-height:1.5}",
+    ".ch-pills{display:flex;gap:4px}",
+    ".ch-pill{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#aab3c5;border-radius:12px;padding:3px 9px;font-size:11px;cursor:pointer}",
+    ".ch-pill:hover{color:#f0f4ff;border-color:rgba(255,255,255,.25)}",
+    ".ch-pill-on{background:linear-gradient(135deg,rgba(56,189,248,.28),rgba(129,140,248,.22));border-color:rgba(56,189,248,.5);color:#f0f4ff;font-weight:600}",
   ].join("");
   doc.head.appendChild(style);
 
@@ -3774,7 +3866,38 @@ function buildUnipusUi() {
   const body = doc.createElement("div");
   body.className = "ch-body";
 
-  // 挂机总开关行
+  // ---- 全局主开关：开始 / 停止刷课（2026-10-21 用户需求：面板应是整体控制，而非只管语音题）----
+  const sweepBtn = doc.createElement("button");
+  sweepBtn.className = "ch-btn";
+  sweepBtn.id = "ch-sweep-toggle";
+  const sweepState = doc.createElement("div");
+  sweepState.className = "ch-status";
+  sweepState.id = "ch-sweep-status";
+
+  const renderSweep = () => {
+    const on = unipusSweepEnabled === true;
+    sweepBtn.textContent = on ? "⏹ 停止刷课" : "▶ 开始刷课";
+    if (on) sweepBtn.classList.add("ch-stop"); else sweepBtn.classList.remove("ch-stop");
+    sweepState.textContent = on
+      ? "状态：运行中（自动答题 / 录音 / 视频倍速 / 翻页）"
+      : "状态：已停止（不再自动操作页面）";
+    sweepState.style.color = on ? "#4ade80" : "#fbbf24";
+  };
+  sweepBtn.addEventListener("click", () => {
+    unipusSweepEnabled = !unipusSweepEnabled;
+    // 同步 chrome.storage.local.autoAnswer（runAutoAnswer 会读取该开关；刷新后仍生效）。
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ autoAnswer: unipusSweepEnabled });
+      }
+    } catch (_storageError) { /* 无 chrome 环境忽略 */ }
+    renderSweep();
+    pushUiLog(unipusSweepEnabled ? "已开始刷课" : "已停止刷课（当前动作完成后不再自动操作）", !unipusSweepEnabled);
+    if (unipusSweepEnabled) scheduleAutoAnswerForNewQuestions();
+  });
+  renderSweep();
+
+  // 语音题挂机（仅控制语音录音流程）
   const row1 = doc.createElement("div");
   row1.className = "ch-row";
   const l1 = doc.createElement("span");
@@ -3787,12 +3910,7 @@ function buildUnipusUi() {
     const on = !s1.classList.contains("ch-on");
     s1.classList.toggle("ch-on", on);
     writeUiSetting(UI_STORAGE_KEYS.autopilot, on);
-    if (on) {
-      scheduleAutoAnswerForNewQuestions();
-      pushUiLog("挂机已开启", false);
-    } else {
-      pushUiLog("挂机已暂停（当前题完成后停止）", true);
-    }
+    pushUiLog(on ? "语音题挂机已开启" : "语音题挂机已暂停", !on);
   });
   row1.appendChild(l1); row1.appendChild(s1);
 
@@ -3811,12 +3929,48 @@ function buildUnipusUi() {
   });
   row2.appendChild(l2); row2.appendChild(s2);
 
-  // 立即执行按钮
+  // 视频倍速（写 chrome.storage.local.videoSpeed，即时生效）
+  const videoRow = doc.createElement("div");
+  videoRow.className = "ch-row";
+  const videoLabel = doc.createElement("span");
+  videoLabel.className = "ch-label";
+  videoLabel.textContent = "视频倍速";
+  const videoPills = doc.createElement("span");
+  videoPills.className = "ch-pills";
+  const currentRate = readUnipusVideoRate(activeContext);
+  const rateButtons = [];
+  [1, 1.5, 2, 3].forEach((rate) => {
+    const pill = doc.createElement("button");
+    pill.className = "ch-pill" + (Math.abs(rate - currentRate) < 0.01 ? " ch-pill-on" : "");
+    pill.textContent = rate + "x";
+    pill.addEventListener("click", () => {
+      rateButtons.forEach((b) => b.classList.remove("ch-pill-on"));
+      pill.classList.add("ch-pill-on");
+      try {
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+          chrome.storage.local.set({ videoSpeed: rate });
+        }
+      } catch (_storageError) { /* 忽略 */ }
+      if (activeContext && activeContext.settings) activeContext.settings.videoSpeed = rate;
+      applyUnipusVideoPolicy(activeContext);
+      pushUiLog("视频倍速已设为 " + rate + "x", false);
+    });
+    rateButtons.push(pill);
+    videoPills.appendChild(pill);
+  });
+  videoRow.appendChild(videoLabel);
+  videoRow.appendChild(videoPills);
+
+  // 本页立即执行
   const runBtn = doc.createElement("button");
   runBtn.className = "ch-btn";
   runBtn.id = "ch-run-now";
   runBtn.textContent = "▶ 本页立即执行（答题+录音）";
   runBtn.addEventListener("click", () => {
+    if (unipusSweepEnabled !== true) {
+      pushUiLog("刷课已停止，请先点「开始刷课」", true);
+      return;
+    }
     pushUiLog("手动触发一轮执行", false);
     resetAutoAnswerState();
     void triggerAutoAnswerOnce();
@@ -3827,10 +3981,34 @@ function buildUnipusUi() {
   log.className = "ch-log";
   log.id = "ch-ui-log";
 
+  body.appendChild(sweepBtn);
+  body.appendChild(sweepState);
   body.appendChild(row1);
   body.appendChild(row2);
+  body.appendChild(videoRow);
   body.appendChild(runBtn);
   body.appendChild(log);
+
+  // 从 chrome.storage 同步开关状态（刷新后保持）
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+      // 注意：用"仅含已有键"的读取方式（不传默认值），否则默认值会覆盖 loader 的设置。
+      chrome.storage.local.get(["autoAnswer", "videoSpeed"], (data) => {
+        try {
+          if (data && data.autoAnswer === false) unipusSweepEnabled = false;
+          if (data && Number(data.videoSpeed) > 0 && activeContext && activeContext.settings) {
+            activeContext.settings.videoSpeed = Number(data.videoSpeed);
+          }
+          rateButtons.forEach((b) => {
+            const v = parseFloat(b.textContent);
+            b.classList.toggle("ch-pill-on", Math.abs(v - readUnipusVideoRate(activeContext)) < 0.01);
+          });
+          renderSweep();
+          applyUnipusVideoPolicy(activeContext);
+        } catch (_syncError) { /* 忽略 */ }
+      });
+    }
+  } catch (_storageReadError) { /* 无 chrome 环境忽略 */ }
 
   panel.appendChild(head);
   panel.appendChild(body);
@@ -3909,6 +4087,9 @@ export async function init(ctx) {
   // 用户是【可见】的（只是 JS 上下文隔离）。
   try { buildUnipusUi(); } catch (_uiError) { /* UI 失败不影响自动化 */ }
 
+  // 视频自动播放 + 倍速（用户需求：视频页不再需要手动点播放/调速）。
+  startUnipusVideoPolicy(activeContext);
+
   // 空闲看门狗：页面无任何交互内容时自动经目录推进到下一节（补整课循环）。
   startUnipusIdleWatcher(activeContext);
 
@@ -3935,6 +4116,9 @@ export function destroy() {
 
   // 停止空闲看门狗（目录推进）
   stopUnipusIdleWatcher();
+
+  // 停止视频巡检
+  stopUnipusVideoPolicy();
 
   // 移除 window "message" 监听
   removeQuestionMessageListener();
