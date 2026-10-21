@@ -1,0 +1,118 @@
+[driver] starting https server…
+[server:err] node:events:487
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use :::9445
+    at Server.setupListenHandle [as _listen2] (node:net:2008:16)
+    at listenInCluster (node:net:2065:12)
+    at Server.listen (node:net:2170:7)
+    at file:///E:/%E5%88%B7%E8%AF%BE/verify-live/server.mjs:195:8
+    at ModuleJob.run (node:internal/modules/esm/module_job:437:25)
+    at async node:internal/modules/esm/loader:639:26
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:2044:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  code: 'EADDRINUSE',
+  errno: -4091,
+  syscall: 'listen',
+  address: '::',
+  port: 9445
+}
+
+Node.js v24.15.0
+[driver] starting Edge headless with extension…
+[driver] AVAILABLE targets: ["background_page|chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold/_generated_background_page.h","background_page|chrome-extension://ncbjelpjchkpbikbpkcchkhkblodoama/_generated_background_page.h","background_page|chrome-extension://fikbjbembnmfhppjfnmfkahdhfohhjmg/_generated_background_page.h","background_page|chrome-extension://ihmafllikibpmigkcoadcmckbfhibefp/_generated_background_page.h","background_page|chrome-extension://nkeimhogjdpnpccoofpliimaahmaaome/background.html","page|about:blank","service_worker|chrome-extension://ndcpkimcihhghdcddljkfmmjccdmcmof/background.rollup.js"]
+[driver] no service worker target found, storage preset skipped
+[driver] console: [course-helper] MAIN bridge：平台 chunk 改写器已就绪（等待 question/common 加载）。
+[driver] console: [course-helper] MAIN bridge：弹窗自动确认轮询已启动（1.5s 间隔）。
+[driver] console: [course-helper] [course-helper] 扩展已加载：unipus 适配器 v2026-10-20.56（P0：isDone 作答标记）
+[driver] console: [course-helper] [course-helper] u校园视频：自动播放 + 倍速已启动（当前倍速 3x，每 2s 巡检）。
+[driver] console: [course-helper] [course-helper] u校园保活：keep-alive 已启动（unipus 侧幂等接线）。
+[driver] console: [course-helper] [course-helper] u校园 DOM 降级：题目容器候选均未命中（选择器需在真实页面核对）。
+[driver] console: [course-helper] [course-helper] u校园未获取到任何题目（拦截缓存为空/无法解析且 DOM 提取无结果）。
+[driver] console: [course-helper] [course-helper] u校园未获取到任何题目，跳过答案注入接线。
+[driver] re-preset via SW: ok
+[driver] polling page state (mode=normal)…
+[driver] console: [course-helper] [course-helper] u校园题目类型诊断（1 道）：#1 qtype=4(语音) stem="Read the sentence "
+[driver] console: [course-helper] [course-helper] u校园答案注入已就绪：1 道题，等待用户提交时自动注入。（选择题：选项已点击，提交时仍会注入）
+[driver] console: [course-helper] [course-helper] u校园语音题：模块版本 v2026-10-20.7（ucomp-recorder 录音按钮 + 开关式停止）
+[driver] console: [course-helper] [course-helper] u校园语音题：全页录音控件探测（2 个）——<div class="record-button-group" id="rg1" 162x62> text="·🎙开始录音" | <div class="" id="mic1" 64x40> text="🎙开始录音"
+[driver] console: [course-helper] [course-helper] u校园语音题：全页可点击元素 dump（12 个，小尺寸优先）——<button class="ch-x" 20x19 text="×"> | <button class="ch-pill" 32x20 text="1x"> | <button class="ch-pill" 32x20 text="2x"> | <button cl
+[driver] console: [course-helper] [course-helper] u校园语音题：当前录音状态判定 = 未在录音。
+[driver] console: [course-helper] [course-helper] u校园语音题：逐题循环开始（当前可见录音位 1 个；每题：录音 8000ms → 停止 → 下一题，直到页脚出现"提 交"）。
+[driver] console: [course-helper] MAIN bridge：未找到题目原音，降级正弦波。
+[driver] console: [course-helper] [course-helper] u校园语音题：第 1 题开始录音点击已派发，目标 <div class="" text="🎙 开始录音">。
+[driver] console: [course-helper] MAIN bridge：MediaRecorder 已构造（第 1 个存活记录，流来源=合成音频流）。
+[driver] console: [course-helper] MAIN bridge：MediaRecorder.stop 被调用（平台停止录音）。
+[driver] console: [course-helper] [course-helper] u校园语音题：第 1 题（录音位 #1）已停止录音（dom-toggle）。
+[driver] console: [course-helper] u校园语音题：评分等待超时（10s），继续推进（可能不影响作答登记）。
+[driver] console: [course-helper] [course-helper] u校园语音题：第 1 题完成，无"下一题"且无未完成练习组（整页语音题处理完毕，共 1 题）。
+[driver] console: [course-helper] MAIN bridge：观察到提交请求 https://u.unipus.cn:9445/course/api/v3/newExploration/submit?page=1
+[driver] console: [course-helper] [course-helper] u校园自动提交：已点击提交按钮（<a class="" text="提交">，指针序列），等待平台提交并切下一页。
+[driver] console: [course-helper] [course-helper] u校园提交已注入：answerCount=1，usedTime=69 秒
+[driver] console: [course-helper] [course-helper] u校园本轮提交完成，等待下一页题目到达后自动继续。
+[driver] console: [course-helper] [course-helper] u校园自动翻页：已点击页脚翻页按钮（<a class="continue" text="继续学习">，指针序列），等待下一页题目到达。
+[driver] console: [course-helper] [course-helper] u校园题目类型诊断（2 道）：#1 qtype=3 stem="地球是圆的" | #2 qtype=2 stem="The sky is ____1__"
+[driver] console: [course-helper] [course-helper] u校园选项点击：第 1 个选项 → <label class="" text="B. 错">
+[driver] console: [course-helper] [course-helper] u校园答案注入已就绪：2 道题，等待用户提交时自动注入。（已同步填入页面输入框 1 处）
+[driver] console: [course-helper] MAIN bridge：观察到提交请求 https://u.unipus.cn:9445/course/api/v3/newExploration/submit?page=2
+[driver] console: [course-helper] [course-helper] u校园自动提交：已点击提交按钮（<a class="" text="提交">，指针序列），等待平台提交并切下一页。
+[driver] console: [course-helper] [course-helper] u校园提交已注入：answerCount=2，usedTime=95 秒
+[driver] console: [course-helper] [course-helper] u校园本轮提交完成，等待下一页题目到达后自动继续。
+[driver] console: [course-helper] [course-helper] u校园自动翻页：已点击页脚翻页按钮（<a class="continue" text="继续学习">，指针序列），等待下一页题目到达。
+[driver] targets at end: ["page|edge://sync-confirmation-dialog/","page|https://u.unipus.cn:9445/?deaf=0","service_worker|chrome-extension://eobnaclajemcamihnhnpjblemhdifhid/background/service"]
+[driver] storage full readback (late): {"autoAnswer":true,"autoSubmit":true,"cache:u.unipus.cn:5794bbebdb897f1713711821f70595af":"B","cache:u.unipus.cn:bbb2dff618f6853a64a9c507e58a4c13":"blue","deepseekApiBase":"https://u.unipus.cn:9445/v1/chat/completions","deepseekApiKey":"test-key-for-mock","deepseekModel":"deepseek-chat","deepseekTim
+
+===== 实测报告（mode=normal，两页循环）=====
+页面最终状态: {"cycle":{"page":2,"submitted":[1,2],"stopOk":true,"micClicks":1,"stopRejected":0,"selectedOption":"B. 错","fillValue":"blue","pagesRendered":[1,2],"recordErrors":[]},"st":"已是最后一页（课程结束）","pageTag":"第 2 页","fillVal":"blue"}
+服务端状态: {"submissions":2,"deepseekCalls":2,"quizFetchCount":2,"lastAnswers":["{\"value\":[\"B\"],\"isDone\":true}","{\"value\":[\"\"],\"children\":[{\"value\":[\"blue\"],\"isDone\":true}],\"isDone\":true}"],"lastUsedTime":95}
+--- 扩展 console 日志（course-helper 相关，共 35 条）---
+  [log] [course-helper] MAIN bridge：平台 chunk 改写器已就绪（等待 question/common 加载）。
+  [log] [course-helper] MAIN bridge：弹窗自动确认轮询已启动（1.5s 间隔）。
+  [log] [course-helper] [course-helper] 扩展已加载：unipus 适配器 v2026-10-20.56（P0：isDone 作答标记）
+  [log] [course-helper] [course-helper] u校园视频：自动播放 + 倍速已启动（当前倍速 3x，每 2s 巡检）。
+  [log] [course-helper] [course-helper] u校园保活：keep-alive 已启动（unipus 侧幂等接线）。
+  [log] [course-helper] [course-helper] u校园 DOM 降级：题目容器候选均未命中（选择器需在真实页面核对）。
+  [log] [course-helper] [course-helper] u校园未获取到任何题目（拦截缓存为空/无法解析且 DOM 提取无结果）。
+  [log] [course-helper] [course-helper] u校园未获取到任何题目，跳过答案注入接线。
+  [log] [course-helper] [course-helper] u校园题目类型诊断（1 道）：#1 qtype=4(语音) stem="Read the sentence "
+  [log] [course-helper] [course-helper] u校园答案注入已就绪：1 道题，等待用户提交时自动注入。（选择题：选项已点击，提交时仍会注入）
+  [log] [course-helper] [course-helper] u校园语音题：模块版本 v2026-10-20.7（ucomp-recorder 录音按钮 + 开关式停止）
+  [log] [course-helper] [course-helper] u校园语音题：全页录音控件探测（2 个）——<div class="record-button-group" id="rg1" 162x62> text="·🎙开始录音" | <div class="" id="mic1" 64x40> text="🎙开始录音"
+  [log] [course-helper] [course-helper] u校园语音题：全页可点击元素 dump（12 个，小尺寸优先）——<button class="ch-x" 20x19 text="×"> | <button class="ch-pill" 32x20 text="1x"> | <button class="ch-pill" 32x20 text="2x"> | <button class="ch-pill ch-pill-on" 32x20 tex
+  [log] [course-helper] [course-helper] u校园语音题：当前录音状态判定 = 未在录音。
+  [log] [course-helper] [course-helper] u校园语音题：逐题循环开始（当前可见录音位 1 个；每题：录音 8000ms → 停止 → 下一题，直到页脚出现"提 交"）。
+  [log] [course-helper] MAIN bridge：未找到题目原音，降级正弦波。
+  [log] [course-helper] [course-helper] u校园语音题：第 1 题开始录音点击已派发，目标 <div class="" text="🎙 开始录音">。
+  [log] [course-helper] MAIN bridge：MediaRecorder 已构造（第 1 个存活记录，流来源=合成音频流）。
+  [log] [course-helper] MAIN bridge：MediaRecorder.stop 被调用（平台停止录音）。
+  [log] [course-helper] [course-helper] u校园语音题：第 1 题（录音位 #1）已停止录音（dom-toggle）。
+  [log] [course-helper] u校园语音题：评分等待超时（10s），继续推进（可能不影响作答登记）。
+  [log] [course-helper] [course-helper] u校园语音题：第 1 题完成，无"下一题"且无未完成练习组（整页语音题处理完毕，共 1 题）。
+  [log] [course-helper] MAIN bridge：观察到提交请求 https://u.unipus.cn:9445/course/api/v3/newExploration/submit?page=1
+  [log] [course-helper] [course-helper] u校园自动提交：已点击提交按钮（<a class="" text="提交">，指针序列），等待平台提交并切下一页。
+  [log] [course-helper] [course-helper] u校园提交已注入：answerCount=1，usedTime=69 秒
+  [log] [course-helper] [course-helper] u校园本轮提交完成，等待下一页题目到达后自动继续。
+  [log] [course-helper] [course-helper] u校园自动翻页：已点击页脚翻页按钮（<a class="continue" text="继续学习">，指针序列），等待下一页题目到达。
+  [log] [course-helper] [course-helper] u校园题目类型诊断（2 道）：#1 qtype=3 stem="地球是圆的" | #2 qtype=2 stem="The sky is ____1__"
+  [log] [course-helper] [course-helper] u校园选项点击：第 1 个选项 → <label class="" text="B. 错">
+  [log] [course-helper] [course-helper] u校园答案注入已就绪：2 道题，等待用户提交时自动注入。（已同步填入页面输入框 1 处）
+  [log] [course-helper] MAIN bridge：观察到提交请求 https://u.unipus.cn:9445/course/api/v3/newExploration/submit?page=2
+  [log] [course-helper] [course-helper] u校园自动提交：已点击提交按钮（<a class="" text="提交">，指针序列），等待平台提交并切下一页。
+  [log] [course-helper] [course-helper] u校园提交已注入：answerCount=2，usedTime=95 秒
+  [log] [course-helper] [course-helper] u校园本轮提交完成，等待下一页题目到达后自动继续。
+  [log] [course-helper] [course-helper] u校园自动翻页：已点击页脚翻页按钮（<a class="continue" text="继续学习">，指针序列），等待下一页题目到达。
+--- 关键断言 ---
+PASS 两次提交（page1 语音 + page2 判断/填空），服务器收到 2
+PASS 语音题录音已停止（第 1 页）
+PASS 录音开始按钮被扩展点击（micClicks=1，停止被拒 0 次）
+PASS DeepSeek mock 被调用（判断+填空，共 2 次）
+PASS 判断题选中 mock 答案 B（实际：B. 错）
+PASS 填空题填入 mock 答案 blue（实际：blue）
+PASS SPA 翻页到第 2 页（渲染历史：[1,2]）
+PASS 题目 XHR 两次下发（第 1 页 + 翻页后），实际 2
+
+===== ALL-PASS ✓ =====
+Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 76

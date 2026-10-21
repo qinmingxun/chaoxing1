@@ -372,9 +372,30 @@
       for (var treeIndex = 0; treeIndex < answerTrees.length; treeIndex += 1) {
         var treeInfo = answerTrees[treeIndex];
         for (var valueIndex = 0; valueIndex < treeInfo.leaves.length; valueIndex += 1) {
-          treeInfo.leaves[valueIndex].value = [pendingAnswers[answerCursor]];
+          var filledLeaf = treeInfo.leaves[valueIndex];
+          filledLeaf.value = [pendingAnswers[answerCursor]];
+          // 【2026-10-21 P0】标记该空"已作答"：参考 wenliu 模板的高分模式
+          // （ansObj.children.forEach(c => { if (c.value) c.isDone = true; })）。
+          // 平台很可能按 answer 树里的 isDone 统计已作答题数——缺它就会出现
+          // "还有 N 道题没有作答"（我们此前只写 value，从不打这个标）。
+          filledLeaf.isDone = true;
           answerCursor += 1;
         }
+        // 同时给答案树的直接子节点打标（模板实证：平台读的是 children[].isDone）。
+        try {
+          if (Array.isArray(treeInfo.tree.children)) {
+            for (var childIdx = 0; childIdx < treeInfo.tree.children.length; childIdx += 1) {
+              var childNode = treeInfo.tree.children[childIdx];
+              if (isObject(childNode)) childNode.isDone = true;
+            }
+          }
+        } catch (ignoredIsDoneError) { /* 打标失败不影响 value 注入 */ }
+        // 顶层节点也带上（部分题型平台读根节点）。
+        try {
+          if (isObject(treeInfo.tree) && !Array.isArray(treeInfo.tree)) {
+            treeInfo.tree.isDone = true;
+          }
+        } catch (ignoredRootIsDoneError) { /* 忽略 */ }
         treeInfo.question.answer = JSON.stringify(treeInfo.tree);
       }
 

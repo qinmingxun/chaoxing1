@@ -445,3 +445,21 @@
   `unipusSweepEnabled`（面板与 chrome.storage.local.autoAnswer 同步）为准，并同步快照。
 - **修复 C（面板自愈）**：平台 SPA 重渲染会清掉 body 子节点导致面板消失；看门狗每 5s
   调用一次幂等的 `buildUnipusUi()` 自动重新挂载。
+
+## AGENT 50 P0：isDone 作答标记（v56，2026-10-21）
+
+- **依据**：对比用户提供的 wenliu 模板脚本发现，其"高分模式"注入时会给答案节点打
+  `isDone = true`（`ansObj.children.forEach(c => { if (c.value) c.isDone = true; })`），
+  而我们的 bridge 注入**只写 value、从不打此标**（main-world-bridge.js 约 375 行）。
+  平台很可能按 answer 树的 isDone 统计"已作答题数"——缺它就是长期看到的
+  "还有 N 道题没有作答"的候选根因。
+- **实现**：注入时在【叶子节点】【children 直接子节点】【答案树根节点】三处打 isDone
+  （覆盖不同题型的读取位置）。
+- **离线验证（verify-live 真机端到端）**：8 项断言 ALL-PASS；捕获到真实提交体：
+  `{"value":["B"],"isDone":true}` 与
+  `{"value":[""],"children":[{"value":["blue"],"isDone":true}],"isDone":true}` → isDone 已生效。
+  同时给验证台 /__teststate 增加 lastAnswers / lastUsedTime 出口，便于后续断言提交体。
+- **待真机验证**：需用户配置 DeepSeek API Key（否则选择题/填空题无答案可注入），
+  才能观察平台"未作答"计数是否降为 0。
+- **题库资源调研（未果）**：本环境 web_search 无后端 Key；Bing 手工检索返回无关结果；
+  FastGithub 隧道仅放行 git 协议（普通 HTTPS 请求返回 000）→ 未能找到可用题库。

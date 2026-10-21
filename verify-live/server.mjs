@@ -168,7 +168,16 @@ const server = https.createServer({
   // 状态查询（driver 轮询/断言用）
   if (url.pathname === '/__teststate' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ submissions: submissions.length, deepseekCalls: deepseekCalls.length, quizFetchCount }));
+    const last = submissions.length ? submissions[submissions.length - 1] : null;
+    res.end(JSON.stringify({
+      submissions: submissions.length,
+      deepseekCalls: deepseekCalls.length,
+      quizFetchCount,
+      lastAnswers: last && last.body && Array.isArray(last.body.quesDatas)
+        ? last.body.quesDatas.map((q) => q.answer)
+        : null,
+      lastUsedTime: last ? last.usedTime : null,
+    }));
     return;
   }
   // 重置状态（driver 开场调用，保证断言干净）
