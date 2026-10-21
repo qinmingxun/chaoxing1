@@ -3823,7 +3823,7 @@ function buildUnipusUi() {
     ".ch-title{font-weight:600;font-size:13px;flex:1}",
     ".ch-x{background:none;border:none;color:#7a8499;cursor:pointer;font-size:13px;padding:2px 6px;border-radius:6px}",
     ".ch-x:hover{color:#f0f4ff;background:rgba(255,255,255,.08)}",
-    ".ch-body{padding:10px 12px;display:flex;flex-direction:column;gap:10px;max-height:420px;overflow:hidden}",
+    ".ch-body{padding:10px 12px;display:flex;flex-direction:column;gap:9px;max-height:min(76vh,640px);overflow-y:auto}",
     ".ch-row{display:flex;align-items:center;justify-content:space-between;gap:8px}",
     ".ch-label{color:#aab3c5}",
     ".ch-switch{width:34px;height:19px;border-radius:10px;background:rgba(255,255,255,.15);border:none;position:relative;cursor:pointer;flex-shrink:0;transition:background .25s}",
@@ -3832,7 +3832,7 @@ function buildUnipusUi() {
     ".ch-switch.ch-on::after{left:17px}",
     ".ch-btn{background:linear-gradient(135deg,#059669,#047857);color:#fff;border:none;border-radius:9px;padding:8px 10px;font-size:12px;font-weight:600;cursor:pointer}",
     ".ch-btn.ch-stop{background:linear-gradient(135deg,#991b1b,#7f1d1d)}",
-    ".ch-log{flex:1;min-height:120px;max-height:180px;overflow-y:auto;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.06);border-radius:9px;padding:8px;font-family:Consolas,monospace;font-size:11px;line-height:1.55}",
+    ".ch-log{flex:1;min-height:110px;max-height:170px;overflow-y:auto;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.06);border-radius:9px;padding:8px;font-family:Consolas,monospace;font-size:11px;line-height:1.55}",
     ".ch-log::-webkit-scrollbar{width:5px}",
     ".ch-log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:4px}",
     ".ch-log-line{color:#9fb0c8;word-break:break-all}",
@@ -3844,6 +3844,12 @@ function buildUnipusUi() {
     ".ch-pill{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#aab3c5;border-radius:12px;padding:3px 9px;font-size:11px;cursor:pointer}",
     ".ch-pill:hover{color:#f0f4ff;border-color:rgba(255,255,255,.25)}",
     ".ch-pill-on{background:linear-gradient(135deg,rgba(56,189,248,.28),rgba(129,140,248,.22));border-color:rgba(56,189,248,.5);color:#f0f4ff;font-weight:600}",
+    ".ch-col{display:flex;flex-direction:column;gap:5px}",
+    ".ch-input{width:100%;box-sizing:border-box;background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.12);color:#f0f4ff;border-radius:8px;padding:6px 8px;font-size:11px;font-family:Consolas,monospace;outline:none}",
+    ".ch-input:focus{border-color:rgba(56,189,248,.6)}",
+    ".ch-input-row{display:flex;gap:6px;align-items:center}",
+    ".ch-btn-sm{padding:6px 10px;font-size:11px;border-radius:8px}",
+    ".ch-key-status{font-size:10px}",
   ].join("");
   doc.head.appendChild(style);
 
@@ -3961,6 +3967,68 @@ function buildUnipusUi() {
   videoRow.appendChild(videoLabel);
   videoRow.appendChild(videoPills);
 
+  // ---- DeepSeek API Key（页内配置，免去点扩展图标；选择题/填空题必需）----
+  const keyCol = doc.createElement("div");
+  keyCol.className = "ch-col";
+  const keyLabelRow = doc.createElement("div");
+  keyLabelRow.className = "ch-row";
+  const keyLabel = doc.createElement("span");
+  keyLabel.className = "ch-label";
+  keyLabel.textContent = "DeepSeek API Key";
+  const keyStatus = doc.createElement("span");
+  keyStatus.className = "ch-status ch-key-status";
+  keyStatus.id = "ch-key-status";
+  keyLabelRow.appendChild(keyLabel);
+  keyLabelRow.appendChild(keyStatus);
+
+  const keyInputRow = doc.createElement("div");
+  keyInputRow.className = "ch-input-row";
+  const keyInput = doc.createElement("input");
+  keyInput.type = "password";
+  keyInput.className = "ch-input";
+  keyInput.id = "ch-api-key";
+  keyInput.placeholder = "sk-...（留空则清空）";
+  const keyEye = doc.createElement("button");
+  keyEye.className = "ch-btn ch-btn-sm";
+  keyEye.textContent = "👁";
+  keyEye.title = "显示 / 隐藏";
+  const keySave = doc.createElement("button");
+  keySave.className = "ch-btn ch-btn-sm";
+  keySave.id = "ch-key-save";
+  keySave.textContent = "保存";
+  keyInputRow.appendChild(keyInput);
+  keyInputRow.appendChild(keyEye);
+  keyInputRow.appendChild(keySave);
+
+  const renderKeyStatus = (value) => {
+    const configured = typeof value === "string" && value.length > 8 && value.indexOf("<YOUR") === -1;
+    keyStatus.textContent = configured ? "已配置" : "未配置（选择题/填空题答不了）";
+    keyStatus.style.color = configured ? "#4ade80" : "#fbbf24";
+  };
+  renderKeyStatus("");
+
+  keyEye.addEventListener("click", () => {
+    keyInput.type = keyInput.type === "password" ? "text" : "password";
+    keyEye.textContent = keyInput.type === "password" ? "👁" : "🙈";
+  });
+  keySave.addEventListener("click", () => {
+    const value = String(keyInput.value || "").trim();
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ deepseekApiKey: value });
+        renderKeyStatus(value);
+        pushUiLog(value ? "API Key 已保存（选择题/填空题可自动作答）" : "API Key 已清空", !value);
+      } else {
+        pushUiLog("保存失败：chrome.storage 不可用", true);
+      }
+    } catch (_saveError) {
+      pushUiLog("保存失败：" + (_saveError && _saveError.message ? _saveError.message : "未知错误"), true);
+    }
+  });
+
+  keyCol.appendChild(keyLabelRow);
+  keyCol.appendChild(keyInputRow);
+
   // 本页立即执行
   const runBtn = doc.createElement("button");
   runBtn.className = "ch-btn";
@@ -3986,6 +4054,7 @@ function buildUnipusUi() {
   body.appendChild(row1);
   body.appendChild(row2);
   body.appendChild(videoRow);
+  body.appendChild(keyCol);
   body.appendChild(runBtn);
   body.appendChild(log);
 
@@ -3993,9 +4062,13 @@ function buildUnipusUi() {
   try {
     if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
       // 注意：用"仅含已有键"的读取方式（不传默认值），否则默认值会覆盖 loader 的设置。
-      chrome.storage.local.get(["autoAnswer", "videoSpeed"], (data) => {
+      chrome.storage.local.get(["autoAnswer", "videoSpeed", "deepseekApiKey"], (data) => {
         try {
           if (data && data.autoAnswer === false) unipusSweepEnabled = false;
+          if (data && typeof data.deepseekApiKey === "string") {
+            keyInput.value = data.deepseekApiKey;
+            renderKeyStatus(data.deepseekApiKey);
+          }
           if (data && Number(data.videoSpeed) > 0 && activeContext && activeContext.settings) {
             activeContext.settings.videoSpeed = Number(data.videoSpeed);
           }
