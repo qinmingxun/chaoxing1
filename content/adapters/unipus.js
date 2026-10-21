@@ -223,6 +223,7 @@ function runCleanups(cleanups) {
 
 // 通用警告：ctx.log 优先（loader 提供），回退页面控制台（zhihuishu 同风格）。
 function unipusWarn(context, message) {
+  try { if (typeof pushUiLog === "function") pushUiLog(message, true); } catch (_uiLogError) { /* UI 未就绪 */ }
   if (context && typeof context.log === "function") {
     try {
       context.log(`[course-helper] ${message}`);
@@ -239,6 +240,7 @@ function unipusWarn(context, message) {
 
 // 普通信息日志（ctx.log 优先，回退页面控制台）。
 function unipusLog(context, message) {
+  try { if (typeof pushUiLog === "function") pushUiLog(message, false); } catch (_uiLogError) { /* UI 未就绪 */ }
   if (context && typeof context.log === "function") {
     try {
       context.log(`[course-helper] ${message}`);
@@ -3809,6 +3811,11 @@ export async function init(ctx) {
   // 主控接线：立即尝试一次自动答题（题目数据可能已拦截）；未成功时由
   // 题目数据事件（handleQuestionDataPayload → triggerAutoAnswerOnce）驱动重试。
   void triggerAutoAnswerOnce();
+
+  // 页内控制面板（可见 UI：挂机开关 / 立即执行 / 实时日志）。
+  // 注意：content script 与页面共享同一 DOM，因此在 isolated world 创建的元素
+  // 用户是【可见】的（只是 JS 上下文隔离）。
+  try { buildUnipusUi(); } catch (_uiError) { /* UI 失败不影响自动化 */ }
 
   // 空闲看门狗：页面无任何交互内容时自动经目录推进到下一节（补整课循环）。
   startUnipusIdleWatcher(activeContext);
