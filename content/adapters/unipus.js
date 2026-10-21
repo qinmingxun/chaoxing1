@@ -2338,7 +2338,7 @@ function waitForVoiceScore(context) {
         return;
       }
       if (Date.now() - startedAt >= VOICE_SCORE_WAIT_MS) {
-        unipusLog(context, "u校园语音题：评分等待超时（${Math.round(VOICE_SCORE_WAIT_MS / 1000)}s），继续推进（可能不影响作答登记）。");
+        unipusLog(context, `u校园语音题：评分等待超时（${Math.round(VOICE_SCORE_WAIT_MS / 1000)}s），继续推进（可能不影响作答登记）。`);
         resolve(false);
         return;
       }
@@ -2962,6 +2962,8 @@ async function simulateVoiceRecordingsInner(context) {
   unipusLog(context,
     `u校园语音题：逐题循环开始（当前可见录音位 ${count} 个；每题：录音 ${VOICE_RECORD_DURATION_MS}ms → 停止 → 下一题，直到页脚出现"提 交"）。`);
   let questionIndex = 0;
+  // 多题同屏布局的下标游标（无"下一题"时使用），见循环内布局判定注释。
+  let multiIndex = 0;
   for (; questionIndex < maxQuestions; questionIndex += 1) {
     // 每轮重新取 document（SPA 翻页可能替换 document，避免旧引用失效）。
     const docNow = getContextDocument(context);
@@ -2971,8 +2973,18 @@ async function simulateVoiceRecordingsInner(context) {
       unipusLog(context, `u校园语音题：第 ${questionIndex + 1} 题无可见录音位（可能全部完成），结束循环。`);
       break;
     }
-    // 只点当前（第一个）录音位——其余是后续题的
-    const clickTarget = startButtons[0];
+    // 布局判定（2026-10-21 用户实测反馈修复）：
+    //  A) 单题布局：页脚有"下一题"（如 6-2 Sharing 的组内翻页）→ 始终点第 0 个；
+    //  B) 多题布局：页脚只有"提交"（如 2-5 Pronunciation 五题同屏）→ 按 multiIndex
+    //     依次处理；旧逻辑固定点第 0 个，导致第 1 题后就误判"整页处理完毕"（用户实测现象）。
+    const hasNextLinkNow = Boolean(docNow ? findFootLinkByText(docNow, /下一题/) : null);
+    const targetIndex = hasNextLinkNow ? 0 : multiIndex;
+    if (targetIndex >= startButtons.length) {
+      unipusLog(context,
+        `u校园语音题：同页 ${startButtons.length} 个录音位均已处理（多题布局），结束录音循环。`);
+      break;
+    }
+    const clickTarget = startButtons[targetIndex];
     const clickOk = clickRecordTarget(context, clickTarget);
     try {
       unipusLog(context,
@@ -2984,9 +2996,16 @@ async function simulateVoiceRecordingsInner(context) {
         ? Math.round(sampleSeconds * 1000) + 2000
         : VOICE_RECORD_DURATION_MS;
       await new Promise((resolve) => setTimeout(resolve, recordWindowMs));
-      const outcome = await tryStopRecording(context, 0);
+      // 【2026-10-21 用户实测修复】停止必须点【当前正在录的那个录音位】：
+      // 原实现硬编码索引 0，在多题同屏布局下会去点第 1 个（导致当前题一直在录、
+      // 用户看到"每一题都没停止录音"），单题布局下 targetIndex 恰好为 0 所以没暴露。
+      const outcome = await tryStopRecording(context, targetIndex);
       if (outcome === "none") {
-        unipusWarn(context, `u校园语音题：第 ${questionIndex + 1} 题录音停止未确认。`);
+        unipusWarn(context,
+          `u校园语音题：第 ${questionIndex + 1} 题（录音位 #${targetIndex + 1}）录音停止未确认。`);
+      } else {
+        unipusLog(context,
+          `u校园语音题：第 ${questionIndex + 1} 题（录音位 #${targetIndex + 1}）已停止录音（${outcome}）。`);
       }
       // 【关键】等评分出现再点"下一题"（wenliu 实证：不等分会把该题记为未作答）
       await waitForVoiceScore(docNow);
@@ -3000,6 +3019,17 @@ async function simulateVoiceRecordingsInner(context) {
         }
         await new Promise((resolve) => setTimeout(resolve, VOICE_NEXT_QUESTION_SETTLE_MS));
         continue;
+      }
+      // 无"下一题"：若是多题同屏布局且还有未处理的录音位 → 直接处理下一个（不切组）。
+      if (!nextLink) {
+        multiIndex += 1;
+        const remainingButtons = collectRecordButtons(docNow).length;
+        if (multiIndex < remainingButtons) {
+          unipusLog(context,
+            `u校园语音题：同页还有 ${remainingButtons - multiIndex} 个录音位未处理，继续第 ${multiIndex + 1} 个。`);
+          await new Promise((resolve) => setTimeout(resolve, VOICE_NEXT_QUESTION_SETTLE_MS));
+          continue;
+        }
       }
       // 无"下一题"：找下一个未完成的 Practice tab（.pc-task，非激活可点击）→ 切组
       const nextTab = findNextPracticeTab(docNow);
