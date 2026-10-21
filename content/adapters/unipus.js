@@ -1918,6 +1918,30 @@ export async function runAutoAnswer(ctx) {
   // 语音题（朗读/口语等需录音的题型，v1 不做录音——spec/40）：不送 DeepSeek
   // 求解，答案队列占位空字符串（提交注入时该题值叶子填入空，平台接受则相当于
   // 跳过）；整页只有语音题时仍自动提交翻页。
+  // 【2026-10-21 实测修复】页面存在录音控件时，把 qtype=4 的题一并按语音题处理。
+  // 背景：口语题（如 1-4 Viewing > Think and speak 的 3 道"Now it's your turn"）平台的
+  // replyType 不匹配 UNIPUS_VOICE_REPLY_KEYWORDS（speak|oral|record|voice|…），于是被当成
+  // 文本题送求解 → 求解失败 → "有 N 道题未获得答案" → 整轮跳过，既不录音也不提交，
+  // 只能靠看门狗 20-60s 兜底跳过（用户实测反馈的"卡住/慢"根因）。
+  // DOM 上该页确实有 .ucomp-recorder 录音控件，据此判定为语音题最可靠。
+  try {
+    const docForVoice = getContextDocument(context);
+    const hasRecorderOnPage = Boolean(docForVoice && safeQueryAll(docForVoice, VOICE_RECORD_BUTTON_SELECTOR).length);
+    if (hasRecorderOnPage) {
+      let retagged = 0;
+      questions.forEach((question) => {
+        if (question && question.__isVoice !== true && question.qtype === 4) {
+          question.__isVoice = true;
+          retagged += 1;
+        }
+      });
+      if (retagged > 0) {
+        unipusLog(context,
+          `u校园语音题识别：页面存在录音控件，将 ${retagged} 道 qtype=4 题按语音题处理（走录音流程 + 空占位）。`);
+      }
+    }
+  } catch (_voiceRetagError) { /* 识别失败按原逻辑走 */ }
+
   const solvableIndexes = [];
   const solvableQuestions = [];
   questions.forEach((question, index) => {
@@ -3217,6 +3241,27 @@ function clickSubmitButton(context) {
         } catch (_error) { pathChanged = false; }
         if (/下一题/.test(clickedText) && (groupGone || pathChanged)) {
           unipusLog(context, "u校园自动提交：'下一题'点击后无提交请求但页面已切换（语音题纯前端翻页），正常。");
+          return;
+        }
+        // 硬拦截识别（2026-10-21 实测）：平台弹「还有 N 道题没有作答，请完成后提交 / 我知道了」
+        // 属于【不可绕过的硬拦截】（与"确认要提交吗？取消/确定"的软提示不同）——继续重试
+        // 只会无限循环。此时停止重试，改走"左侧目录下一节"跳过该页，保证整课推进不卡死。
+        let hardBlocked = false;
+        try {
+          for (const dlg of safeQueryAll(docNow, ".ant-modal-confirm-content, .ant-modal-body")) {
+            if (/请完成后提交/.test(asString(dlg.textContent))) { hardBlocked = true; break; }
+          }
+        } catch (_hardBlockError) { /* 判定失败按软提示处理 */ }
+        if (hardBlocked) {
+          unipusWarn(context,
+            "u校园自动提交：平台硬拦截（该页题目未被登记为已作答，如无原音的自由说话题），停止重试提交。");
+          const nextToc = findNextTocItem(docNow);
+          if (nextToc && clickWithPointerSequence(context, nextToc)) {
+            unipusLog(context,
+              `u校园自动提交：硬拦截后改走左侧目录下一节（${describeElement(nextToc)}），继续整课推进。`);
+          } else {
+            unipusWarn(context, "u校园自动提交：硬拦截且目录无下一节，停在当前页（可能已是最后一节）。");
+          }
           return;
         }
         if (attempt < MAX_SUBMIT_RETRY) {

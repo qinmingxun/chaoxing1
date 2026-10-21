@@ -1388,6 +1388,12 @@
   // （触发 onstop 回调，前端进入已录音状态）。
   var liveRecorders = [];
 
+  // 最近一次成功获取的真实语音字节（跨 SPA 节复用）。
+  // 用途：无原音页面（自由说话题，如 1-4 Viewing > Think and speak）注入静音流会导致
+  // 评测不通过、该题记为"未作答"、提交被平台硬拦截；复用前序听力/视听节的真实语音
+  // 可让评测服务器收到真人语音。decodeAudioData 会 detach 传入 buffer，故缓存副本。
+  var cachedSpeechBytes = null;
+
   function describeRecorderSource(stream) {
     try {
       if (stream && stream.fakeStream === true) {
@@ -1838,6 +1844,13 @@
           } catch (ignoredSrcError) {}
         }
         var audioUrl = audioUrls.length ? audioUrls[0] : null;
+        // 无原音页面 → 复用缓存语音（见 cachedSpeechBytes 注释）。
+        var useCachedSpeech = false;
+        if (!audioUrl && cachedSpeechBytes) {
+          useCachedSpeech = true;
+          console.log('[course-helper] MAIN bridge：当前页无原音，复用缓存语音（' +
+            Math.round(cachedSpeechBytes.byteLength / 1024) + 'KB）用于录音流。');
+        }
         // 【关键】必须立即让流有音轨（getUserMedia 立即 resolve），否则平台录音器
         // 卡在"启动中"、扩展 await 永不返回（实测 90 秒无进展）。
         // 先接一个【零音量】振荡器占位（保证流有 track 且完全静音），
@@ -1853,14 +1866,26 @@
         } catch (ignoredPlaceholderError) {
           // 占位失败时仍返回流（可能有 track 但静音）。
         }
-        if (audioUrl && typeof context.decodeAudioData === 'function' && typeof globalWindow.fetch === 'function') {
+        if ((audioUrl || useCachedSpeech) && typeof context.decodeAudioData === 'function') {
           // 异步解码真实人声 → 混入同一 gain（不阻塞 getUserMedia 返回）
           var loadTimeout = setTimeout(function () {
-            console.log('[course-helper] MAIN bridge：题目原音加载超时（8s），继续用静音流。');
+            console.log('[course-helper] MAIN bridge：原音/缓存语音加载超时（8s），继续用静音流。');
           }, 8000);
-          globalWindow.fetch(audioUrl).then(function (response) {
-            return response.arrayBuffer();
-          }).then(function (arrayBuffer) {
+          var speechBytesPromise;
+          if (useCachedSpeech) {
+            speechBytesPromise = Promise.resolve(cachedSpeechBytes.slice(0));
+          } else if (typeof globalWindow.fetch === 'function') {
+            speechBytesPromise = globalWindow.fetch(audioUrl).then(function (response) {
+              return response.arrayBuffer();
+            }).then(function (arrayBuffer) {
+              // 缓存副本供后续无原音页面复用（decodeAudioData 会 detach 原 buffer）。
+              try { cachedSpeechBytes = arrayBuffer.slice(0); } catch (ignoredCacheError) {}
+              return arrayBuffer;
+            });
+          } else {
+            speechBytesPromise = Promise.reject(new Error('fetch 不可用'));
+          }
+          speechBytesPromise.then(function (arrayBuffer) {
             return context.decodeAudioData(arrayBuffer);
           }).then(function (audioBuffer) {
             clearTimeout(loadTimeout);
