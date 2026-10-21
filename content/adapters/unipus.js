@@ -1883,9 +1883,12 @@ export async function runAutoAnswer(ctx) {
 
   // autoAnswer 开关：ctx.settings.autoAnswer（默认 true，CONTRACTS §3）；
   // chrome.storage.local.autoAnswer 防御式覆盖；任一为 false 时不执行。
-  if (context.settings && context.settings.autoAnswer === false) {
-    unipusLog(context, "u校园自动答题已关闭（settings.autoAnswer=false），跳过。");
-    return { started: false, reason: "auto-answer-disabled" };
+  // 【2026-10-21 修复】以模块标志 unipusSweepEnabled 为准（面板「开始/停止刷课」与
+  // chrome.storage.local.autoAnswer 同步）。此前读 context.settings.autoAnswer ——
+  // 那是页面加载时的快照，面板开始刷课后仍是旧值 false，导致"点了开始却不答题"。
+  if (unipusSweepEnabled !== true) {
+    unipusLog(context, "u校园刷课已停止（面板开关），跳过自动答题。");
+    return { started: false, reason: "sweep-disabled" };
   }
   const storageAutoAnswer = await readStorageAutoAnswer();
   if (storageAutoAnswer === false) {
@@ -2969,16 +2972,28 @@ async function simulateVoiceRecordingsInner(context) {
   // 由外层 scheduleAutoSubmit 完成整页提交（19 题作答记录齐全，校验通过）。
   // 旧逻辑一次点完全页录音位再点一次下一题——实测跳题，平台报
   // "还有19道题没有作答"（7789122 版本实测教训）。
+  // 统一由「开始刷课」驱动：停止状态下不录音。
+  if (unipusSweepEnabled !== true) {
+    unipusLog(context, "u校园语音题：刷课已停止，跳过语音录音。");
+    return false;
+  }
   const count = initialButtons.length;
   const maxQuestions = 45; // 上限保护（一页题数未知，跨多个 Practice 组时可能达 19+ 题）
+  setUnipusPanelStatus(`状态：语音题处理中 0/${count}`, "warn");
   unipusLog(context,
     `u校园语音题：逐题循环开始（当前可见录音位 ${count} 个；每题：录音 ${VOICE_RECORD_DURATION_MS}ms → 停止 → 下一题，直到页脚出现"提 交"）。`);
   let questionIndex = 0;
   // 多题同屏布局的下标游标（无"下一题"时使用），见循环内布局判定注释。
   let multiIndex = 0;
   for (; questionIndex < maxQuestions; questionIndex += 1) {
+    // 「停止刷课」后立即中断录音循环（当前题停止后不再继续）。
+    if (unipusSweepEnabled !== true) {
+      unipusLog(context, `u校园语音题：刷课已停止，中断录音循环（已完成 ${questionIndex} 题）。`);
+      break;
+    }
     // 每轮重新取 document（SPA 翻页可能替换 document，避免旧引用失效）。
     const docNow = getContextDocument(context);
+    setUnipusPanelStatus(`状态：语音题处理中 ${questionIndex + 1}/${count}`, "warn");
     // 每轮实时查询录音位（切题后 React 重渲染，旧引用失效）。
     const startButtons = collectRecordButtons(docNow);
     if (!startButtons.length) {
@@ -3065,6 +3080,10 @@ async function simulateVoiceRecordingsInner(context) {
   }
   if (questionIndex >= maxQuestions) {
     unipusWarn(context, `u校园语音题：达到循环上限 ${maxQuestions} 题，停止（防死循环）。`);
+  }
+  // 录音循环结束 → 状态行恢复为运行中（除非用户已停止刷课）。
+  if (unipusSweepEnabled === true) {
+    setUnipusPanelStatus("状态：运行中（自动答题 / 录音 / 视频倍速 / 翻页）", "ok");
   }
   return true;
 }
@@ -3515,6 +3534,9 @@ function startUnipusIdleWatcher(context) {
     try {
       const doc = getContextDocument(context);
       if (!doc) return;
+      // 面板自愈：平台 SPA 重渲染会清掉 body 子节点，导致面板与日志消失。
+      // buildUnipusUi 幂等（已存在直接返回），这里定期确保它还在。
+      try { buildUnipusUi(); } catch (_uiRebuildError) { /* 忽略 */ }
       // 全局"停止刷课"时看门狗完全不动页面（仅保持巡检）。
       if (unipusSweepEnabled !== true) return;
       const hash = unipusPageSignature(context);
@@ -3809,6 +3831,14 @@ function pushUiLog(message, isWarn) {
   }
 }
 
+// 更新页内面板状态行（面板未就绪时静默忽略）。
+function setUnipusPanelStatus(text, tone) {
+  try {
+    const setter = globalThis.__chUnipusSetStatus;
+    if (typeof setter === "function") setter(text, tone);
+  } catch (_statusError) { /* 忽略 */ }
+}
+
 function buildUnipusUi() {
   const doc = typeof document !== "undefined" ? document : null;
   if (!doc || !doc.body) return;
@@ -3880,6 +3910,16 @@ function buildUnipusUi() {
   sweepState.className = "ch-status";
   sweepState.id = "ch-sweep-status";
 
+  // 供适配器其它部分更新状态行（如语音题进度）
+  globalThis.__chUnipusSetStatus = (text, tone) => {
+    try {
+      const el = doc.getElementById("ch-sweep-status");
+      if (!el) return;
+      el.textContent = text;
+      el.style.color = tone === "warn" ? "#fbbf24" : (tone === "ok" ? "#4ade80" : "#9fb0c8");
+    } catch (_statusError) { /* 面板未就绪忽略 */ }
+  };
+
   const renderSweep = () => {
     const on = unipusSweepEnabled === true;
     sweepBtn.textContent = on ? "⏹ 停止刷课" : "▶ 开始刷课";
@@ -3897,43 +3937,23 @@ function buildUnipusUi() {
         chrome.storage.local.set({ autoAnswer: unipusSweepEnabled });
       }
     } catch (_storageError) { /* 无 chrome 环境忽略 */ }
+    // 同步运行时快照，避免其它分支读到旧值（settings 是 loader 初始化时的快照）。
+    try {
+      if (activeContext && activeContext.settings) activeContext.settings.autoAnswer = unipusSweepEnabled;
+    } catch (_settingsSyncError) { /* 忽略 */ }
     renderSweep();
     pushUiLog(unipusSweepEnabled ? "已开始刷课" : "已停止刷课（当前动作完成后不再自动操作）", !unipusSweepEnabled);
-    if (unipusSweepEnabled) scheduleAutoAnswerForNewQuestions();
+    if (unipusSweepEnabled) {
+      scheduleAutoAnswerForNewQuestions();
+    } else {
+      // 停止时把状态行文案拉回"已停止"（语音进度等动态文案清除）
+      renderSweep();
+    }
   });
   renderSweep();
 
-  // 语音题挂机（仅控制语音录音流程）
-  const row1 = doc.createElement("div");
-  row1.className = "ch-row";
-  const l1 = doc.createElement("span");
-  l1.className = "ch-label";
-  l1.textContent = "语音题挂机";
-  const s1 = doc.createElement("button");
-  s1.className = "ch-switch" + (readUiSetting(UI_STORAGE_KEYS.autopilot, true) ? " ch-on" : "");
-  s1.id = "ch-autopilot-switch";
-  s1.addEventListener("click", () => {
-    const on = !s1.classList.contains("ch-on");
-    s1.classList.toggle("ch-on", on);
-    writeUiSetting(UI_STORAGE_KEYS.autopilot, on);
-    pushUiLog(on ? "语音题挂机已开启" : "语音题挂机已暂停", !on);
-  });
-  row1.appendChild(l1); row1.appendChild(s1);
-
-  // 评分等待开关
-  const row2 = doc.createElement("div");
-  row2.className = "ch-row";
-  const l2 = doc.createElement("span");
-  l2.className = "ch-label";
-  l2.textContent = "停止后等评分（推荐）";
-  const s2 = doc.createElement("button");
-  s2.className = "ch-switch" + (readUiSetting(UI_STORAGE_KEYS.scoreWait, true) ? " ch-on" : "");
-  s2.addEventListener("click", () => {
-    const on = !s2.classList.contains("ch-on");
-    s2.classList.toggle("ch-on", on);
-    writeUiSetting(UI_STORAGE_KEYS.scoreWait, on);
-  });
-  row2.appendChild(l2); row2.appendChild(s2);
+  // 语音题不再单列开关：统一由「开始/停止刷课」驱动（见 runAutoAnswer → simulateVoiceRecordings）。
+  // 实测原「语音题挂机」「停止后等评分」两个开关只写 localStorage、无逻辑读取（死开关），已移除。
 
   // 视频倍速（写 chrome.storage.local.videoSpeed，即时生效）
   const videoRow = doc.createElement("div");
@@ -4051,8 +4071,6 @@ function buildUnipusUi() {
 
   body.appendChild(sweepBtn);
   body.appendChild(sweepState);
-  body.appendChild(row1);
-  body.appendChild(row2);
   body.appendChild(videoRow);
   body.appendChild(keyCol);
   body.appendChild(runBtn);
@@ -4158,7 +4176,12 @@ export async function init(ctx) {
   // 页内控制面板（可见 UI：挂机开关 / 立即执行 / 实时日志）。
   // 注意：content script 与页面共享同一 DOM，因此在 isolated world 创建的元素
   // 用户是【可见】的（只是 JS 上下文隔离）。
-  try { buildUnipusUi(); } catch (_uiError) { /* UI 失败不影响自动化 */ }
+  try {
+    buildUnipusUi();
+  } catch (uiError) {
+    // 面板构建失败必须可见（此前静默 try/catch 导致"面板不出现"极难排查）。
+    unipusWarn(activeContext, "u校园面板构建失败：" + (uiError && uiError.message ? uiError.message : String(uiError)));
+  }
 
   // 视频自动播放 + 倍速（用户需求：视频页不再需要手动点播放/调速）。
   startUnipusVideoPolicy(activeContext);

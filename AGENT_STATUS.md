@@ -426,3 +426,22 @@
 - 已知问题（需用户配置）：选择题/填空题依赖 **DeepSeek API Key**，未配置时日志报
   「有 N 道题未获得答案，跳过答案队列下发」。配置入口=扩展图标弹窗（popup 内已有
   deepseekApiKey / videoSpeed / autoAnswer / autoSubmit 等设置项）。
+
+## AGENT 49 语音题统一进「开始刷课」+ 修复两处自身缺陷（v52-v55，2026-10-21 用户需求）
+
+用户需求：「把语音题的 ui 统一进开始刷课里面，开始刷课后见到语音也自动答」
+
+- **移除语音题独立开关**：panel 里「语音题挂机」「停止后等评分」两个开关是**死开关**
+  （只写 localStorage，无任何逻辑读取），已删除；语音题改由全局「开始/停止刷课」统一驱动。
+- **语音循环接入全局开关**：`simulateVoiceRecordingsInner` 开头与每轮循环检查
+  `unipusSweepEnabled`，停止刷课即跳过/中断录音（当前题停止后不再继续）。
+- **状态行显示语音进度**：新增 `globalThis.__chUnipusSetStatus`，录音循环期间状态行显示
+  「语音题处理中 k/N」，结束恢复「运行中」。
+- **修复 A（我的锅）**：删除两个开关行后，下面 `body.appendChild(row1/row2)` 仍引用已删变量
+  → `buildUnipusUi` 抛 ReferenceError → **面板完全不出现**。已移除残留引用，并让面板构建
+  失败时打警告（此前静默 try/catch 导致"没面板"极难排查）。
+- **修复 B**：`runAutoAnswer` 读的是 `context.settings.autoAnswer`（loader 初始化快照），
+  点「开始刷课」后该快照仍是 false → "点了开始却不答题"。改为以模块标志
+  `unipusSweepEnabled`（面板与 chrome.storage.local.autoAnswer 同步）为准，并同步快照。
+- **修复 C（面板自愈）**：平台 SPA 重渲染会清掉 body 子节点导致面板消失；看门狗每 5s
+  调用一次幂等的 `buildUnipusUi()` 自动重新挂载。
