@@ -1678,6 +1678,13 @@ function scheduleAutoAnswerForNewQuestions() {
 }
 
 function triggerAutoAnswerOnce() {
+  // 【2026-10-21 用户实测事故修复】语音逐题循环运行期间（可能持续数分钟）绝不允许
+  // 重入：否则第二条流程会走完非语音路径并调度"自动提交"，抢在录音完成前提交，
+  // 造成"没作答就提交"（实测：手动点面板"本页立即执行"触发，answerCount=5 但 5 题未作答）。
+  if (voiceLoopRunning === true) {
+    unipusWarn(activeContext, "u校园语音逐题循环运行中，跳过本轮自动答题/提交重入。");
+    return null;
+  }
   if (autoAnswerState.started || autoAnswerState.running) return autoAnswerState.running;
   const now = Date.now();
   if (now - autoAnswerState.lastAttemptAt < AUTO_ANSWER_RETRY_THROTTLE_MS) return null;
@@ -2704,6 +2711,11 @@ async function tryStopRecording(context, index) {
     for (const element of safeQueryAll(doc, selector)) {
       if (stopSeen.has(element)) continue;
       stopSeen.add(element);
+      // 排除扩展自己的面板（其标签"停止后等评分（推荐）"含"停止"二字，
+      // 实测被文本扫描命中并误点，见 2026-10-21 用户会话日志）。
+      try {
+        if (element.closest && element.closest("#ch-panel, #ch-ball")) continue;
+      } catch (_panelSkipError) { /* closest 不可用时按原逻辑 */ }
       const text = asString(element.textContent).replace(/\s+/g, "").trim();
       const pseudo = getElementPseudoText(element);
       let attrs = "";
@@ -3225,6 +3237,11 @@ function clickElementSafely(context, element) {
 }
 
 function clickSubmitButton(context) {
+  // 语音循环运行中禁止提交（双保险：见 triggerAutoAnswerOnce 的同一事故说明）。
+  if (voiceLoopRunning === true) {
+    unipusWarn(context, "u校园自动提交：语音逐题循环运行中，暂不提交（等录音全部完成后再提交）。");
+    return false;
+  }
   const doc = getContextDocument(context);
   const found = findSubmitButton(doc);
   if (!found.element) {
