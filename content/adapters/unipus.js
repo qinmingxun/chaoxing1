@@ -1886,6 +1886,8 @@ export async function runAutoAnswer(ctx) {
 
   const questions = await getQuestions();
   if (!questions.length) {
+    // 标记"适配器已确认无可答题目"——看门狗据此用更短的兜底阈值。
+    try { unipusNoQuestionConfirmedAt = Date.now(); } catch (_flagError) { /* 忽略 */ }
     unipusWarn(context, "u校园未获取到任何题目，跳过答案注入接线。");
     return { started: false, reason: "no-questions" };
   }
@@ -3354,6 +3356,11 @@ const IDLE_ADVANCE_MS = 12000;
 // → 兜底点页脚"提交/下一题"推进，避免整课循环永久死锁（实测：6-4 Viewing 有 2 道
 // textarea 题但适配器"未获取到任何题目"）。阈值取大一些，避免抢在数据到达前误提交。
 const STUCK_ESCAPE_MS = 60000;
+// 适配器已明确"取不到题目"时用的短阈值：此时 60s 纯属等待（题目若稍后到达，答题流程
+// 会置 busy 并重置计时，不会误提交）。20s 足以覆盖"数据还在路上"的常见情况。
+const STUCK_ESCAPE_FAST_MS = 20000;
+// 适配器最近一次确认"无题可答"的时间戳（0 = 未确认）。
+let unipusNoQuestionConfirmedAt = 0;
 const IDLE_WATCH_INTERVAL_MS = 5000;
 const idleWatchState = { timer: null, lastActivityAt: 0, advancedHash: "", lastSignature: "" };
 
@@ -3432,7 +3439,12 @@ function startUnipusIdleWatcher(context) {
       const hasContent = unipusHasInteractiveContent(doc);
       const idleMs = Date.now() - idleWatchState.lastActivityAt;
       // 有题目但无人处理 → 用更保守的卡死逃生阈值；无内容 → 用普通空闲阈值。
-      const threshold = hasContent ? STUCK_ESCAPE_MS : IDLE_ADVANCE_MS;
+      // 自适应阈值：已确认无题可答 → 20s（快速跳过未覆盖题型页）；否则 60s（给题目
+      // 数据到达与求解留足时间）；无内容页 → 12s。
+      const noQuestionConfirmed = unipusNoQuestionConfirmedAt > idleWatchState.lastActivityAt;
+      const threshold = hasContent
+        ? (noQuestionConfirmed ? STUCK_ESCAPE_FAST_MS : STUCK_ESCAPE_MS)
+        : IDLE_ADVANCE_MS;
       if (idleMs < threshold) return;
       if (idleWatchState.advancedHash === hash) return; // 每页只推一次
       // 情况 A：无题目但页脚有按钮（实测 6-4 Viewing 导语页：页脚有"提交"却无可答题目）
