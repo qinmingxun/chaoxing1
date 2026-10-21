@@ -3355,12 +3355,24 @@ const IDLE_ADVANCE_MS = 12000;
 // textarea 题但适配器"未获取到任何题目"）。阈值取大一些，避免抢在数据到达前误提交。
 const STUCK_ESCAPE_MS = 60000;
 const IDLE_WATCH_INTERVAL_MS = 5000;
-const idleWatchState = { timer: null, lastActivityAt: 0, advancedHash: "" };
+const idleWatchState = { timer: null, lastActivityAt: 0, advancedHash: "", lastSignature: "" };
 
 function unipusPageSignature(context) {
   try {
     const view = getContextWindow(context);
-    return String(view && view.location ? view.location.hash : "") || "";
+    const hash = String(view && view.location ? view.location.hash : "") || "";
+    // 页脚按钮文本纳入标识（2026-10-21 实测必要）：兜底提交后页面从"提交"变为
+    // "继续学习"（答题小结页），但 hash 不变——若只按 hash 去重，看门狗的"每页一次"
+    // 护栏会挡住这一次推进，导致卡在答题小结页。
+    let footText = "";
+    try {
+      const doc = getContextDocument(context);
+      const foot = doc && typeof doc.querySelector === "function" ? doc.querySelector("#pc-foot") : null;
+      if (foot) {
+        footText = asString(foot.textContent).replace(/\s+/g, "").slice(0, 12);
+      }
+    } catch (_footError) { /* 页脚不可读时只用 hash */ }
+    return hash + "|" + footText;
   } catch (_error) {
     return "";
   }
@@ -3403,6 +3415,14 @@ function startUnipusIdleWatcher(context) {
       const doc = getContextDocument(context);
       if (!doc) return;
       const hash = unipusPageSignature(context);
+      // 页面状态变化（含页脚按钮变化）→ 重置空闲预算，给新页面充分时间渲染题目，
+      // 避免"上一页已积攒的空闲时间"让看门狗在新页题目出现前就急着点提交
+      // （2026-10-21 实测风险：不重置会导致连点 提交→继续学习→提交，可能跳过内容）。
+      if (idleWatchState.lastSignature !== hash) {
+        idleWatchState.lastSignature = hash;
+        idleWatchState.lastActivityAt = Date.now();
+        return;
+      }
       // "有人在干活"：答题求解中 / 语音逐题循环中 → 视为活跃，重置空闲计时。
       const busy = Boolean(autoAnswerState && autoAnswerState.running) || voiceLoopRunning === true;
       if (busy) {
