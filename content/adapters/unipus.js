@@ -2276,6 +2276,69 @@ const VOICE_RECORDER_WRAP_SELECTOR = ".record-button-wrap .ucomp-recorder";
 const VOICE_STOP_VERIFY_DELAY_MS = 600; // 停止点击后的验证等待（React 状态切换）
 const VOICE_NEXT_QUESTION_SETTLE_MS = 2500; // 点"下一题"后新题渲染等待（React+数据加载）
 
+// ---- 评分等待（2026-10-20 参考 wenliu 脚本实证）----
+// 停止录音后平台的作答登记依赖【评分回调完成】（腾讯 SOE 返回分数渲染到
+// .score_layout / .practice-score .score / .oral-score）。不等分数就点"下一题"
+// 会导致该题被记为未作答——正是"还有 N 道题没有作答"的根因。
+// 停止后轮询评分元素（最多 VOICE_SCORE_WAIT_MS），出现即作答已登记。
+const VOICE_SCORE_WAIT_MS = 15000;
+const VOICE_SCORE_SELECTORS = [".score_layout", ".practice-score .score", ".score-wrapper .score", ".oral-score"];
+
+function readRecordedScore(doc) {
+  for (const selector of VOICE_SCORE_SELECTORS) {
+    for (const element of safeQueryAll(doc, selector)) {
+      const text = asString(element.textContent).trim();
+      if (text) return text.slice(0, 20);
+    }
+  }
+  return null;
+}
+
+function waitForVoiceScore(context) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const check = () => {
+      const score = readRecordedScore(getContextDocument(context));
+      if (score !== null) {
+        unipusLog(context, `u校园语音题：评分已出现（${score}），作答登记完成。`);
+        resolve(true);
+        return;
+      }
+      if (Date.now() - startedAt >= VOICE_SCORE_WAIT_MS) {
+        unipusLog(context, "u校园语音题：评分等待超时（15s），继续推进（可能不影响作答登记）。");
+        resolve(false);
+        return;
+      }
+      setTimeout(check, 500);
+    };
+    check();
+  });
+}
+
+// 录音态按钮判定（.recording class，参考 wenliu：录音中按钮加 .recording）。
+function isRecordButtonRecording(doc) {
+  for (const selector of [".record-icon.recording", ".button-record.recording", ".record-fill-icon.recording"]) {
+    if (safeQueryAll(doc, selector).length) return true;
+  }
+  return false;
+}
+
+// 当前题原音时长（秒）：取第一个 audio.unipus-audio-h5（题目自带朗读）；
+// 读取失败回退 0（由调用方用固定窗口兜底）。
+function readSampleAudioDurationSeconds(doc) {
+  try {
+    const audio = doc && typeof doc.querySelector === "function"
+      ? doc.querySelector("audio.unipus-audio-h5")
+      : null;
+    if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+      return audio.duration;
+    }
+  } catch (_error) {
+    // 元素不可读时回退。
+  }
+  return 0;
+}
+
 // 组内"停止"目标（录音态）：取【最深】命中——React 录音组件的原生监听常绑在
 // 文本叶子/图标层，点外层 wrapper 事件不经过深层元素。伪元素渲染文本（css
 // content）的宿主元素也算命中。先序遍历最后一个命中即最深命中。
@@ -2785,15 +2848,20 @@ function detectRecordingActive(context) {
 // 返回第一个【非激活】的 tab；全部完成返回 null。
 function findNextPracticeTab(doc) {
   if (!doc || typeof doc.querySelectorAll !== "function") return null;
-  for (const tab of safeQueryAll(doc, ".pc-task")) {
-    const cls = asString(tab.className);
-    if (/pc-header-task-activity/.test(cls)) continue;
-    const text = asString(tab.textContent).replace(/\s+/g, "").trim();
-    if (!/Practice/i.test(text)) continue;
-    if (!isElementVisible(tab)) continue;
-    return tab;
+  const tabs = safeQueryAll(doc, ".pc-task");
+  let activeIndex = -1;
+  for (let i = 0; i < tabs.length; i += 1) {
+    if (/pc-header-task-activity/.test(asString(tabs[i].className))) {
+      activeIndex = i;
+      break;
+    }
   }
-  return null;
+  // 找到激活组 → 返回其【下一个】（修复：旧逻辑返回第一个非激活组=Practice-1，
+  // 点已完成组导致循环终止）；无激活组 → 返回第一个（页面初始态兜底）。
+  if (activeIndex >= 0) {
+    return activeIndex + 1 < tabs.length ? tabs[activeIndex + 1] : null;
+  }
+  return tabs.length ? tabs[0] : null;
 }
 
 let voiceLoopRunning = false;
@@ -2857,13 +2925,15 @@ async function simulateVoiceRecordingsInner(context) {
   // 旧逻辑一次点完全页录音位再点一次下一题——实测跳题，平台报
   // "还有19道题没有作答"（7789122 版本实测教训）。
   const count = initialButtons.length;
-  const maxQuestions = Math.max(count * 3, 25); // 上限保护（一页题数未知，按 3 倍录音位+25 兜底）
+  const maxQuestions = 45; // 上限保护（一页题数未知，跨多个 Practice 组时可能达 19+ 题）
   unipusLog(context,
     `u校园语音题：逐题循环开始（当前可见录音位 ${count} 个；每题：录音 ${VOICE_RECORD_DURATION_MS}ms → 停止 → 下一题，直到页脚出现"提 交"）。`);
   let questionIndex = 0;
   for (; questionIndex < maxQuestions; questionIndex += 1) {
-    // 每轮实时查询录音位（切题后 React 重渲染，旧引用失效）
-    const startButtons = collectRecordButtons(doc);
+    // 每轮重新取 document（SPA 翻页可能替换 document，避免旧引用失效）。
+    const docNow = getContextDocument(context);
+    // 每轮实时查询录音位（切题后 React 重渲染，旧引用失效）。
+    const startButtons = collectRecordButtons(docNow);
     if (!startButtons.length) {
       unipusLog(context, `u校园语音题：第 ${questionIndex + 1} 题无可见录音位（可能全部完成），结束循环。`);
       break;
@@ -2871,39 +2941,52 @@ async function simulateVoiceRecordingsInner(context) {
     // 只点当前（第一个）录音位——其余是后续题的
     const clickTarget = startButtons[0];
     const clickOk = clickRecordTarget(context, clickTarget);
-    unipusLog(context,
-      `u校园语音题：第 ${questionIndex + 1} 题开始录音点击${clickOk ? "已派发" : "失败"}，目标 ${describeElement(clickTarget)}。`);
-    await new Promise((resolve) => setTimeout(resolve, VOICE_RECORD_DURATION_MS));
-    const outcome = await tryStopRecording(context, 0);
-    if (outcome === "none") {
-      unipusWarn(context, `u校园语音题：第 ${questionIndex + 1} 题录音停止未确认。`);
-    }
-    // 页脚还有"下一题"？→ 组内切题
-    const nextLink = doc ? findFootLinkByText(doc, /下一题/) : null;
-    if (nextLink) {
-      if (clickWithPointerSequence(context, nextLink)) {
-        unipusLog(context, `u校园语音题：已点击"下一题"，等待第 ${questionIndex + 2} 题渲染。`);
-      } else {
-        unipusWarn(context, `u校园语音题："下一题"点击失败。`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, VOICE_NEXT_QUESTION_SETTLE_MS));
-      continue;
-    }
-    // 无"下一题"：找下一个未完成的 Practice tab（.pc-task，非激活可点击）→ 切组
-    const nextTab = findNextPracticeTab(doc);
-    if (nextTab) {
+    try {
       unipusLog(context,
-        `u校园语音题：组内题完成，切换下一个练习组（${describeElement(nextTab)}）。`);
-      if (clickWithPointerSequence(context, nextTab)) {
+        `u校园语音题：第 ${questionIndex + 1} 题开始录音点击${clickOk ? "已派发" : "失败"}，目标 ${describeElement(clickTarget)}。`);
+      // 录音窗口 = 原音时长 + 2s 缓冲（参考 wenliu：固定短窗截断音频会被 SOE 判无效）；
+      // 读不到原音时长时回退固定窗口。
+      const sampleSeconds = readSampleAudioDurationSeconds(docNow);
+      const recordWindowMs = sampleSeconds > 0
+        ? Math.round(sampleSeconds * 1000) + 2000
+        : VOICE_RECORD_DURATION_MS;
+      await new Promise((resolve) => setTimeout(resolve, recordWindowMs));
+      const outcome = await tryStopRecording(context, 0);
+      if (outcome === "none") {
+        unipusWarn(context, `u校园语音题：第 ${questionIndex + 1} 题录音停止未确认。`);
+      }
+      // 【关键】等评分出现再点"下一题"（wenliu 实证：不等分会把该题记为未作答）
+      await waitForVoiceScore(docNow);
+      // 页脚还有"下一题"？→ 组内切题
+      const nextLink = docNow ? findFootLinkByText(docNow, /下一题/) : null;
+      if (nextLink) {
+        if (clickWithPointerSequence(context, nextLink)) {
+          unipusLog(context, `u校园语音题：已点击"下一题"，等待第 ${questionIndex + 2} 题渲染。`);
+        } else {
+          unipusWarn(context, `u校园语音题："下一题"点击失败。`);
+        }
         await new Promise((resolve) => setTimeout(resolve, VOICE_NEXT_QUESTION_SETTLE_MS));
         continue;
       }
-      unipusWarn(context, "u校园语音题：练习组 tab 点击失败。");
+      // 无"下一题"：找下一个未完成的 Practice tab（.pc-task，非激活可点击）→ 切组
+      const nextTab = findNextPracticeTab(docNow);
+      if (nextTab) {
+        unipusLog(context,
+          `u校园语音题：组内题完成，切换下一个练习组（${describeElement(nextTab)}）。`);
+        if (clickWithPointerSequence(context, nextTab)) {
+          await new Promise((resolve) => setTimeout(resolve, VOICE_NEXT_QUESTION_SETTLE_MS));
+          continue;
+        }
+        unipusWarn(context, "u校园语音题：练习组 tab 点击失败。");
+      }
+      // 既无"下一题"也无未完成 tab：整页语音题完成
+      unipusLog(context,
+        `u校园语音题：第 ${questionIndex + 1} 题完成，无"下一题"且无未完成练习组（整页语音题处理完毕，共 ${questionIndex + 1} 题）。`);
+      break;
+    } catch (loopError) {
+      unipusWarn(context, `u校园语音题：第 ${questionIndex + 1} 题处理异常，停止循环：${loopError && loopError.message ? loopError.message : String(loopError)}`);
+      break;
     }
-    // 既无"下一题"也无未完成 tab：整页语音题完成
-    unipusLog(context,
-      `u校园语音题：第 ${questionIndex + 1} 题完成，无"下一题"且无未完成练习组（整页语音题处理完毕，共 ${questionIndex + 1} 题）。`);
-    break;
   }
   if (questionIndex >= maxQuestions) {
     unipusWarn(context, `u校园语音题：达到循环上限 ${maxQuestions} 题，停止（防死循环）。`);
@@ -3106,24 +3189,38 @@ function clickSubmitButton(context) {
     // 例外：语音题"下一题"可能为纯前端翻页（无 /submit 请求）——若按钮组已消失或
     // pathname 变化，视为翻页成功，不告警。
     const clickedText = asString(found.element.textContent).trim();
-    resetSubmitObservation();
-    submitObserveTimer = setTimeout(() => {
-      submitObserveTimer = null;
-      if (submitObserved) return;
-      const docNow = getContextDocument(context);
-      const groupGone = !docNow || !safeQuery(docNow, VOICE_RECORD_GROUP_SELECTOR);
-      let pathChanged = false;
-      try {
-        pathChanged = Boolean(context && context.location &&
-          asString(context.location.pathname) !== clickPathname);
-      } catch (_error) { pathChanged = false; }
-      if (/下一题/.test(clickedText) && (groupGone || pathChanged)) {
-        unipusLog(context, "u校园自动提交：'下一题'点击后无提交请求但页面已切换（语音题纯前端翻页），正常。");
-        return;
-      }
-      unipusWarn(context,
-        "u校园自动提交：点击后 8 秒未观察到提交请求（平台前端校验拦截或按钮不可用？请检查页面状态与弹窗）。");
-    }, 8000);
+    // 提交重试（2026-10-20 实测）：语音题整页完成后点"提 交"，平台弹信息框
+    // 「还有 N 道题没有作答，请完成后提交 / 我知道了」——bridge 自动点掉后，
+    // 必须【再点一次"提 交"】才会弹"确认要提交吗？取消/确定"，点"确定"才真正发出
+    // POST /newExploration/submit。因此 8 秒未观察到提交时自动重试点击（最多 3 次）。
+    const MAX_SUBMIT_RETRY = 3;
+    const observeSubmitOutcome = (attempt) => {
+      resetSubmitObservation();
+      submitObserveTimer = setTimeout(() => {
+        submitObserveTimer = null;
+        if (submitObserved) return;
+        const docNow = getContextDocument(context);
+        const groupGone = !docNow || !safeQuery(docNow, VOICE_RECORD_GROUP_SELECTOR);
+        let pathChanged = false;
+        try {
+          pathChanged = Boolean(context && context.location &&
+            asString(context.location.pathname) !== clickPathname);
+        } catch (_error) { pathChanged = false; }
+        if (/下一题/.test(clickedText) && (groupGone || pathChanged)) {
+          unipusLog(context, "u校园自动提交：'下一题'点击后无提交请求但页面已切换（语音题纯前端翻页），正常。");
+          return;
+        }
+        if (attempt < MAX_SUBMIT_RETRY) {
+          unipusLog(context,
+            `u校园自动提交：第 ${attempt} 次点击后仍无提交请求（可能被"还有 N 题未作答"信息框拦截），` +
+            `自动重试第 ${attempt + 1} 次点击"提 交"...`);
+          if (clickSubmitButton(context)) return;
+        }
+        unipusWarn(context,
+          `u校园自动提交：点击 ${MAX_SUBMIT_RETRY} 次后仍未观察到提交请求（平台前端校验拦截或按钮不可用？请检查页面状态与弹窗）。`);
+      }, 8000);
+    };
+    observeSubmitOutcome(1);
     return true;
   }
   unipusWarn(context, "u校园自动提交：提交按钮点击失败。");
@@ -3304,6 +3401,206 @@ function dispatchWakeEvent(doc) {
 }
 
 // ==== END SECTION: unipus-keep-alive ====
+
+// ==== SECTION: unipus-ui ====
+// ---- 控制面板 UI（2026-10-20 参考 wenliu 深色主题设计）----
+// 功能：挂机总开关（暂停/恢复逐题循环）、语音设置（录音窗口缓冲/评分等待开关）、
+// 实时日志（滚动显示最近 30 条 unipusLog/unipusWarn）、悬浮球（面板关闭后可唤回）。
+// 纯 DOM 注入，无外部资源；样式 scoped 前缀 ch- 防与平台冲突。
+
+const UI_STORAGE_KEYS = {
+  autopilot: "chUnipusAutopilot",
+  scoreWait: "chUnipusScoreWait",
+};
+
+function readUiSetting(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : raw === "true";
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+function writeUiSetting(key, value) {
+  try { localStorage.setItem(key, String(value)); } catch (_error) { /* 隐私模式忽略 */ }
+}
+
+// 日志环形缓冲（UI 显示用；unipusLog/unipusWarn 尾部转发进来）
+const uiLogBuffer = [];
+const UI_LOG_MAX = 30;
+function pushUiLog(message, isWarn) {
+  const time = new Date().toTimeString().slice(0, 8);
+  uiLogBuffer.push({ time, message: String(message).slice(0, 160), isWarn: !!isWarn });
+  while (uiLogBuffer.length > UI_LOG_MAX) uiLogBuffer.shift();
+  const box = typeof document !== "undefined"
+    ? document.getElementById("ch-ui-log") : null;
+  if (box) {
+    const line = document.createElement("div");
+    line.className = isWarn ? "ch-log-line ch-log-warn" : "ch-log-line";
+    line.textContent = "[" + time + "] " + message;
+    box.appendChild(line);
+    while (box.children.length > UI_LOG_MAX) box.removeChild(box.firstChild);
+    box.scrollTop = box.scrollHeight;
+  }
+}
+
+function buildUnipusUi() {
+  const doc = typeof document !== "undefined" ? document : null;
+  if (!doc || !doc.body) return;
+  if (doc.getElementById("ch-panel")) return; // 幂等
+
+  const style = doc.createElement("style");
+  style.textContent = [
+    "#ch-panel{position:fixed;top:16px;right:16px;z-index:2147483000;width:300px;font-family:'PingFang SC',system-ui,sans-serif;background:#0f1420;color:#f0f4ff;border:1px solid rgba(255,255,255,.09);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.45);overflow:hidden;font-size:12px}",
+    "#ch-panel.ch-hidden{display:none}",
+    ".ch-head{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:move;background:rgba(255,255,255,.03);border-bottom:1px solid rgba(255,255,255,.07)}",
+    ".ch-dot{width:8px;height:8px;border-radius:50%;background:#4ade80;flex-shrink:0}",
+    ".ch-title{font-weight:600;font-size:13px;flex:1}",
+    ".ch-x{background:none;border:none;color:#7a8499;cursor:pointer;font-size:13px;padding:2px 6px;border-radius:6px}",
+    ".ch-x:hover{color:#f0f4ff;background:rgba(255,255,255,.08)}",
+    ".ch-body{padding:10px 12px;display:flex;flex-direction:column;gap:10px;max-height:420px;overflow:hidden}",
+    ".ch-row{display:flex;align-items:center;justify-content:space-between;gap:8px}",
+    ".ch-label{color:#aab3c5}",
+    ".ch-switch{width:34px;height:19px;border-radius:10px;background:rgba(255,255,255,.15);border:none;position:relative;cursor:pointer;flex-shrink:0;transition:background .25s}",
+    ".ch-switch::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left .25s}",
+    ".ch-switch.ch-on{background:#38bdf8}",
+    ".ch-switch.ch-on::after{left:17px}",
+    ".ch-btn{background:linear-gradient(135deg,#059669,#047857);color:#fff;border:none;border-radius:9px;padding:8px 10px;font-size:12px;font-weight:600;cursor:pointer}",
+    ".ch-btn.ch-stop{background:linear-gradient(135deg,#991b1b,#7f1d1d)}",
+    ".ch-log{flex:1;min-height:120px;max-height:180px;overflow-y:auto;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.06);border-radius:9px;padding:8px;font-family:Consolas,monospace;font-size:11px;line-height:1.55}",
+    ".ch-log::-webkit-scrollbar{width:5px}",
+    ".ch-log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:4px}",
+    ".ch-log-line{color:#9fb0c8;word-break:break-all}",
+    ".ch-log-warn{color:#fbbf24}",
+    "#ch-ball{position:fixed;left:16px;bottom:16px;z-index:2147483000;width:42px;height:42px;border-radius:50%;background:#0f1420;color:#38bdf8;border:1px solid rgba(255,255,255,.14);display:none;align-items:center;justify-content:center;cursor:pointer;font-size:17px;box-shadow:0 4px 18px rgba(0,0,0,.5)}",
+    "#ch-ball:hover{border-color:#38bdf8}",
+  ].join("");
+  doc.head.appendChild(style);
+
+  const panel = doc.createElement("div");
+  panel.id = "ch-panel";
+
+  const head = doc.createElement("div");
+  head.className = "ch-head";
+  const dot = doc.createElement("span");
+  dot.className = "ch-dot";
+  dot.id = "ch-state-dot";
+  const title = doc.createElement("span");
+  title.className = "ch-title";
+  title.textContent = "刷课助手 · u校园";
+  const closeBtn = doc.createElement("button");
+  closeBtn.className = "ch-x";
+  closeBtn.textContent = "×";
+  head.appendChild(dot); head.appendChild(title); head.appendChild(closeBtn);
+
+  const body = doc.createElement("div");
+  body.className = "ch-body";
+
+  // 挂机总开关行
+  const row1 = doc.createElement("div");
+  row1.className = "ch-row";
+  const l1 = doc.createElement("span");
+  l1.className = "ch-label";
+  l1.textContent = "语音题挂机";
+  const s1 = doc.createElement("button");
+  s1.className = "ch-switch" + (readUiSetting(UI_STORAGE_KEYS.autopilot, true) ? " ch-on" : "");
+  s1.id = "ch-autopilot-switch";
+  s1.addEventListener("click", () => {
+    const on = !s1.classList.contains("ch-on");
+    s1.classList.toggle("ch-on", on);
+    writeUiSetting(UI_STORAGE_KEYS.autopilot, on);
+    if (on) {
+      scheduleAutoAnswerForNewQuestions();
+      pushUiLog("挂机已开启", false);
+    } else {
+      pushUiLog("挂机已暂停（当前题完成后停止）", true);
+    }
+  });
+  row1.appendChild(l1); row1.appendChild(s1);
+
+  // 评分等待开关
+  const row2 = doc.createElement("div");
+  row2.className = "ch-row";
+  const l2 = doc.createElement("span");
+  l2.className = "ch-label";
+  l2.textContent = "停止后等评分（推荐）";
+  const s2 = doc.createElement("button");
+  s2.className = "ch-switch" + (readUiSetting(UI_STORAGE_KEYS.scoreWait, true) ? " ch-on" : "");
+  s2.addEventListener("click", () => {
+    const on = !s2.classList.contains("ch-on");
+    s2.classList.toggle("ch-on", on);
+    writeUiSetting(UI_STORAGE_KEYS.scoreWait, on);
+  });
+  row2.appendChild(l2); row2.appendChild(s2);
+
+  // 立即执行按钮
+  const runBtn = doc.createElement("button");
+  runBtn.className = "ch-btn";
+  runBtn.id = "ch-run-now";
+  runBtn.textContent = "▶ 本页立即执行（答题+录音）";
+  runBtn.addEventListener("click", () => {
+    pushUiLog("手动触发一轮执行", false);
+    resetAutoAnswerState();
+    void triggerAutoAnswerOnce();
+  });
+
+  // 日志区
+  const log = doc.createElement("div");
+  log.className = "ch-log";
+  log.id = "ch-ui-log";
+
+  body.appendChild(row1);
+  body.appendChild(row2);
+  body.appendChild(runBtn);
+  body.appendChild(log);
+
+  panel.appendChild(head);
+  panel.appendChild(body);
+  doc.body.appendChild(panel);
+
+  // 悬浮球
+  const ball = doc.createElement("div");
+  ball.id = "ch-ball";
+  ball.textContent = "⚡";
+  ball.title = "打开刷课助手面板";
+  ball.addEventListener("click", () => {
+    ball.style.display = "none";
+    panel.classList.remove("ch-hidden");
+  });
+  doc.body.appendChild(ball);
+
+  closeBtn.addEventListener("click", () => {
+    panel.classList.add("ch-hidden");
+    ball.style.display = "flex";
+  });
+
+  // 拖拽
+  let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  head.addEventListener("mousedown", (e) => {
+    dragging = true; sx = e.clientX - ox; sy = e.clientY - oy;
+    e.preventDefault();
+  });
+  doc.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    ox = e.clientX - sx; oy = e.clientY - sy;
+    panel.style.transform = "translate(" + ox + "px," + oy + "px)";
+  });
+  doc.addEventListener("mouseup", () => { dragging = false; });
+
+  // 回放缓冲日志
+  for (const entry of uiLogBuffer) {
+    const line = doc.createElement("div");
+    line.className = entry.isWarn ? "ch-log-line ch-log-warn" : "ch-log-line";
+    line.textContent = "[" + entry.time + "] " + entry.message;
+    log.appendChild(line);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+// unipusLog/unipusWarn 的 UI 转发：在两个日志函数体内加钩子（保持原 console 输出）。
+
+// ==== END SECTION: unipus-ui ====
 
 // ==== SECTION: unipus-lifecycle ====
 

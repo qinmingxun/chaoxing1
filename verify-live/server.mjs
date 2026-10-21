@@ -45,6 +45,62 @@ const submissions = [];        // {page, body, injected:boolean}
 const deepseekCalls = [];      // 收到的求解请求
 let quizFetchCount = 0;        // 题目下发次数（第 1 页一次 + 翻页后一次）
 
+
+// ---- 弹窗测试页（模拟平台 antd 弹窗：信息框 + 关闭动画）----
+const DIALOG_TEST_PAGE = `<!doctype html>
+<html><head><meta charset="utf-8"><title>dialog test</title>
+<style>
+body{font-family:system-ui;margin:20px}
+.ant-modal-wrap{position:fixed;inset:0;z-index:1000;display:block}
+.ant-modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.45)}
+.ant-modal{position:relative;width:420px;margin:120px auto;background:#fff;border-radius:8px;padding:18px;box-shadow:0 6px 20px rgba(0,0,0,.2)}
+.ant-btn{padding:5px 16px;border-radius:6px;background:#1677ff;color:#fff;border:none;cursor:pointer}
+.ant-modal-wrap.ant-fade-leave{opacity:.4}
+.ant-modal.ant-zoom-leave{transform:scale(.96)}
+#log{margin-top:16px;font-family:Consolas,monospace;color:#333}
+</style></head>
+<body>
+<h1>dialog test page</h1>
+<div id="log">clicks=0</div>
+<script>
+window.__clicks = 0;
+window.__dialogShown = 0;
+function showDialog() {
+  window.__dialogShown += 1;
+  var wrap = document.createElement('div');
+  wrap.className = 'ant-modal-root';
+  wrap.innerHTML =
+    '<div class="ant-modal-mask"></div>' +
+    '<div class="ant-modal-wrap">' +
+      '<div class="ant-modal ant-modal-confirm ant-modal-confirm-info system-info-cloud-modal">' +
+        '<div class="ant-modal-content"><div class="ant-modal-body">' +
+          '<div class="ant-modal-confirm-body-wrapper">' +
+            '<div class="ant-modal-confirm-body">' +
+              '<span class="cloud-modal-info-icon">!</span>' +
+              '<div class="ant-modal-confirm-content">还有1道题没有作答，请完成后提交。</div>' +
+            '</div>' +
+            '<div class="ant-modal-confirm-btns">' +
+              '<button class="ant-btn ant-btn-primary system-info-cloud-ok-button"><span>我知道了</span></button>' +
+            '</div>' +
+          '</div>' +
+        '</div></div>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(wrap);
+  var btn = wrap.querySelector('button');
+  btn.addEventListener('click', function () {
+    window.__clicks += 1;
+    document.getElementById('log').textContent = 'clicks=' + window.__clicks;
+    wrap.querySelector('.ant-modal-wrap').classList.add('ant-fade-leave');
+    wrap.querySelector('.ant-modal').classList.add('ant-zoom-leave');
+    setTimeout(function () { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }, 1500);
+  });
+}
+window.__showDialog = showDialog;
+setTimeout(showDialog, 1200);
+</script>
+</body></html>`;
+
 const page = fs.readFileSync(path.join(__dirname, 'page.html'), 'utf8');
 
 const server = https.createServer({
@@ -101,6 +157,12 @@ const server = https.createServer({
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ code: 0, msg: 'ok' }));
     });
+    return;
+  }
+  // 弹窗测试页（离线验证 MAIN bridge 的弹窗自动确认 + 去重逻辑，不需要登录）
+  if (url.pathname === '/dialog-test' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(DIALOG_TEST_PAGE);
     return;
   }
   // 状态查询（driver 轮询/断言用）

@@ -15,6 +15,24 @@
   var VERSION = 1;
   var MARKER = '__COURSE_HELPER_MAIN_BRIDGE__';
   var SUBMIT_PATH = '/course/api/v3/newExploration/submit';
+
+  // 安全取元素文本（兼容 textContent / innerText / 伪元素文本缺失）。
+  function asStringSafe(value) {
+    if (value == null) return '';
+    try { return String(value); } catch (_e) { return ''; }
+  }
+  // 取元素的 ::before/::after 伪元素文本（平台按钮可能把文本写进伪元素）。
+  function getPseudoTextSafe(element) {
+    if (!element || typeof window.getComputedStyle !== 'function') return '';
+    try {
+      var before = window.getComputedStyle(element, '::before');
+      var after = window.getComputedStyle(element, '::after');
+      var parts = [];
+      if (before && before.content) parts.push(before.content.replace(/^["']|["']$/g, ''));
+      if (after && after.content) parts.push(after.content.replace(/^["']|["']$/g, ''));
+      return parts.join(' ');
+    } catch (_e) { return ''; }
+  }
   var INPUT_EVENTS = [
     'course-helper:main:init',
     'course-helper:main:set-confirm',
@@ -2048,4 +2066,157 @@
   installPlatformRecorderProbe();
   // 终局方案：平台 chunk 源码改写（isRecording 全局开关）。
   installPlatformScriptRewriter();
+
+  // ---- 平台确认对话框自动确认（wenliu 参考：检测"还有 N 道题没有作答..."并点"确 定"/"我知道了"）----
+  // 语音题逐题完成后点"提 交"时，平台弹确认对话框；不立即点"确定"就直接关页/刷页，
+  // 提交会被拦截。这里 MutationObserver 监听新增对话框，命中关键词文本后自动点击
+  // 按钮（"确定"、"我知道了"、"继续"、"确认"等）。
+  // 元素是否可见：Ant Design 弹窗为 position:fixed，内部按钮 offsetParent === null，
+  // 不能用 offsetParent 判断（2026-10-20 实测踩坑：按钮被误判不可见而跳过点击）。
+  function isElementVisibleSafe(element) {
+    if (!element) return false;
+    try {
+      var rect = element.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      var style = window.getComputedStyle(element);
+      if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+      return true;
+    } catch (_e) { return false; }
+  }
+
+  // 上溯到弹窗根容器：匹配到的常是正文子节点（.ant-modal-confirm-body），
+  // 其内部【不含按钮】（按钮在兄弟节点 .ant-modal-confirm-btns）——
+  // 必须上溯到 .ant-modal-wrap / .ant-modal / [role=dialog] 才能取到按钮。
+  function resolveDialogRoot(node) {
+    var current = node;
+    var depth = 0;
+    while (current && depth < 8) {
+      try {
+        if (current.nodeType === 1) {
+          var cls = asStringSafe(current.className);
+          var role = current.getAttribute ? current.getAttribute('role') : '';
+          if (current.classList && (
+            current.classList.contains('ant-modal-wrap') ||
+            current.classList.contains('ant-modal') ||
+            current.classList.contains('ant-modal-root'))) {
+            return current;
+          }
+          if (role === 'dialog' || /(^|[-_\s])(modal|dialog|popup|confirm)/i.test(cls)) {
+            return current;
+          }
+        }
+      } catch (_e) { /* 继续上溯 */ }
+      current = current.parentElement;
+      depth += 1;
+    }
+    return node;
+  }
+
+  // 在弹窗根内找确认按钮；找不到再全局兜底查 .ant-modal-confirm-btns button
+  // （不同 antd 版本 DOM 层级差异大）。
+  function findDismissButton(dlg) {
+    var PREFERRED = ['确定', '确认', '我知道了', '继续', 'OK', '好的'];
+    var roots = [];
+    if (dlg) roots.push(dlg);
+    try {
+      var wraps = globalWindow.document.querySelectorAll(
+        '.ant-modal-wrap, .ant-modal, .ant-modal-confirm-btns, [role="dialog"]');
+      for (var wi = 0; wi < wraps.length; wi += 1) roots.push(wraps[wi]);
+    } catch (_qe) { /* 全局查询失败时只用 dlg */ }
+    for (var pi = 0; pi < PREFERRED.length; pi += 1) {
+      var keyword = PREFERRED[pi];
+      for (var ri = 0; ri < roots.length; ri += 1) {
+        var root = roots[ri];
+        if (!root || !root.querySelectorAll) continue;
+        var buttons = root.querySelectorAll('button, .ant-btn, [role="button"], a.ant-btn, button span');
+        for (var bi = 0; bi < buttons.length; bi += 1) {
+          var btn = buttons[bi];
+          var text = asStringSafe(btn.textContent).replace(/\s+/g, '');
+          if (!text || text.indexOf(keyword) === -1) continue;
+          if (!isElementVisibleSafe(btn)) continue;
+          return btn;
+        }
+      }
+    }
+    return null;
+  }
+
+  // 弹窗自动确认（2026-10-20 实测版）：定时轮询，直接查弹窗内按钮 → 判文本 →
+  // 判尺寸（position:fixed 下 offsetParent 为 null，禁用该判据）→ 点击。
+  // 覆盖三类平台弹窗：
+  //  1) 进页信息框「本单元学习时间：无限制 是否必修：非必修 / 我知道了」——遮罩挡住后续点击；
+  //  2) 提交校验框「还有 N 道题没有作答，请完成后提交 / 我知道了」；
+  //  3) 提交确认框「还有 N 道题没有作答，确认要提交吗？ / 取消 确定」。
+  // 不用 MutationObserver/根容器解析——实测层级解析易静默失败（按钮在兄弟节点）。
+  function installDialogDismisser() {
+    if (!globalWindow.document) return;
+    // 【分工】只点"确定/确认"——提交确认框「还有 N 道题没有作答，确认要提交吗？/取消 确定」。
+    // "我知道了"（信息框）由 content/keep-alive.js 负责（它有意只点"我知道了"系、不点"确定"类
+    // 危险按钮）。此处若也点"我知道了"会造成同按钮被两个模块重复点击
+    // （2026-10-21 离线实测：4 次点击中 3 次来自 keep-alive 的重复轮询）。
+    var CLICK_TEXTS = ['确定', '确认'];
+
+    // 去重（2026-10-21 离线实测校准）：旧版"8 秒窗口"在弹窗被刻意保留 14s 时
+    // 会在第 12s 再次点击。改为【永久去重 · 跨实例安全】：
+    //  1) DOM 标记 dataset.chDialogClicked：多 bridge 实例下也只点一次；
+    //  2) WeakSet：同元素永不再点；
+    //  3) 全局 1.2s 节流：防同一轮询周期内点多个按钮。
+    var clickedButtons = new WeakSet();
+    var lastClickAt = 0;
+    function isDialogClosing(btn) {
+      try {
+        var wrap = btn.closest ? btn.closest('.ant-modal-wrap') : null;
+        if (wrap && /fade-leave|zoom-leave|ant-modal-wrap-hidden/.test(asStringSafe(wrap.className))) return true;
+        var modal = btn.closest ? btn.closest('.ant-modal') : null;
+        if (modal && /fade-leave|zoom-leave/.test(asStringSafe(modal.className))) return true;
+      } catch (_e) { /* 判定失败按未关闭处理 */ }
+      return false;
+    }
+
+    function pollDialogs() {
+      try {
+        var doc = globalWindow.document;
+        var buttons = doc.querySelectorAll(
+          '.ant-modal button, .ant-modal .ant-btn, .ant-modal-wrap button, .system-info-cloud-ok-button, [role="dialog"] button');
+        var now = Date.now();
+        for (var i = 0; i < buttons.length; i += 1) {
+          var btn = buttons[i];
+          if (!btn) continue;
+          if (isDialogClosing(btn)) continue;
+          var text = asStringSafe(btn.textContent).replace(/\s+/g, '');
+          if (!text) continue;
+          var matched = false;
+          for (var k = 0; k < CLICK_TEXTS.length; k += 1) {
+            if (text.indexOf(CLICK_TEXTS[k]) !== -1) { matched = true; break; }
+          }
+          if (!matched) continue;
+          var rect = null;
+          try { rect = btn.getBoundingClientRect(); } catch (_rectError) { rect = null; }
+          if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+          if (clickedButtons.has(btn)) continue;
+          try { if (btn.dataset && btn.dataset.chDialogClicked === '1') continue; } catch (_dsReadErr) {}
+          if (now - lastClickAt < 1200) continue;
+          clickedButtons.add(btn);
+          try { if (btn.dataset) btn.dataset.chDialogClicked = '1'; } catch (_dsWriteErr) {}
+          lastClickAt = now;
+          try {
+            btn.click();
+          } catch (_clickError) {
+            try {
+              btn.dispatchEvent(new globalWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+            } catch (_dispatchError) {}
+          }
+          console.log('[course-helper] MAIN bridge：自动点击弹窗按钮「' + text + '」。');
+        }
+      } catch (pollError) {
+        console.log('[course-helper] MAIN bridge：弹窗轮询异常：' +
+          (pollError && pollError.message ? pollError.message : String(pollError)));
+      }
+    }
+
+    setInterval(pollDialogs, 1500);
+    console.log('[course-helper] MAIN bridge：弹窗自动确认轮询已启动（1.5s 间隔）。');
+  }
+
+  installDialogDismisser();
 })(typeof window !== 'undefined' ? window : null);
