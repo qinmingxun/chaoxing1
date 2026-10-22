@@ -4049,6 +4049,86 @@ function buildUnipusUi() {
   keyCol.appendChild(keyLabelRow);
   keyCol.appendChild(keyInputRow);
 
+  // ---- 题库 API（可选，唯一题库来源；未配置则只用 DeepSeek）----
+  const bankCol = doc.createElement("div");
+  bankCol.className = "ch-col";
+  const bankLabelRow = doc.createElement("div");
+  bankLabelRow.className = "ch-row";
+  const bankLabel = doc.createElement("span");
+  bankLabel.className = "ch-label";
+  bankLabel.textContent = "题库 API";
+  const bankStatus = doc.createElement("span");
+  bankStatus.className = "ch-status ch-key-status";
+  bankLabelRow.appendChild(bankLabel);
+  bankLabelRow.appendChild(bankStatus);
+
+  const bankUrlRow = doc.createElement("div");
+  bankUrlRow.className = "ch-input-row";
+  const bankUrlInput = doc.createElement("input");
+  bankUrlInput.type = "text";
+  bankUrlInput.className = "ch-input";
+  bankUrlInput.id = "ch-bank-url";
+  bankUrlInput.placeholder = "https://题库/api/query（留空=只用 DeepSeek）";
+  const bankSave = doc.createElement("button");
+  bankSave.className = "ch-btn ch-btn-sm";
+  bankSave.id = "ch-bank-save";
+  bankSave.textContent = "保存";
+  bankUrlRow.appendChild(bankUrlInput);
+  bankUrlRow.appendChild(bankSave);
+
+  const bankKeyRow = doc.createElement("div");
+  bankKeyRow.className = "ch-input-row";
+  const bankKeyInput = doc.createElement("input");
+  bankKeyInput.type = "password";
+  bankKeyInput.className = "ch-input";
+  bankKeyInput.id = "ch-bank-key";
+  bankKeyInput.placeholder = "题库 Key（可选）";
+  const bankKeyEye = doc.createElement("button");
+  bankKeyEye.className = "ch-btn ch-btn-sm";
+  bankKeyEye.textContent = "👁";
+  bankKeyEye.title = "显示 / 隐藏";
+  bankKeyRow.appendChild(bankKeyInput);
+  bankKeyRow.appendChild(bankKeyEye);
+
+  const renderBankStatus = (url) => {
+    const configured = typeof url === "string" && /^https?:\/\//i.test(url.trim());
+    bankStatus.textContent = configured ? "已启用（先查题库）" : "未配置（仅 DeepSeek）";
+    bankStatus.style.color = configured ? "#4ade80" : "#94a3b8";
+  };
+  renderBankStatus("");
+
+  bankKeyEye.addEventListener("click", () => {
+    bankKeyInput.type = bankKeyInput.type === "password" ? "text" : "password";
+    bankKeyEye.textContent = bankKeyInput.type === "password" ? "👁" : "🙈";
+  });
+  bankSave.addEventListener("click", () => {
+    const url = String(bankUrlInput.value || "").trim();
+    const key = String(bankKeyInput.value || "").trim();
+    if (url && !/^https?:\/\//i.test(url)) {
+      pushUiLog("题库 API 地址需以 http(s):// 开头", true);
+      return;
+    }
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({
+          questionBankUrl: url,
+          questionBankKey: key,
+          questionBankEnabled: Boolean(url)
+        });
+        renderBankStatus(url);
+        pushUiLog(url ? "题库 API 已保存（答题先查题库，未命中走 DeepSeek）" : "题库 API 已清空（只用 DeepSeek）", false);
+      } else {
+        pushUiLog("保存失败：chrome.storage 不可用", true);
+      }
+    } catch (_bankSaveError) {
+      pushUiLog("保存失败：" + (_bankSaveError && _bankSaveError.message ? _bankSaveError.message : "未知错误"), true);
+    }
+  });
+
+  bankCol.appendChild(bankLabelRow);
+  bankCol.appendChild(bankUrlRow);
+  bankCol.appendChild(bankKeyRow);
+
   // 本页立即执行
   const runBtn = doc.createElement("button");
   runBtn.className = "ch-btn";
@@ -4073,6 +4153,7 @@ function buildUnipusUi() {
   body.appendChild(sweepState);
   body.appendChild(videoRow);
   body.appendChild(keyCol);
+  body.appendChild(bankCol);
   body.appendChild(runBtn);
   body.appendChild(log);
 
@@ -4080,12 +4161,19 @@ function buildUnipusUi() {
   try {
     if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
       // 注意：用"仅含已有键"的读取方式（不传默认值），否则默认值会覆盖 loader 的设置。
-      chrome.storage.local.get(["autoAnswer", "videoSpeed", "deepseekApiKey"], (data) => {
+      chrome.storage.local.get(["autoAnswer", "videoSpeed", "deepseekApiKey", "questionBankUrl", "questionBankKey"], (data) => {
         try {
           if (data && data.autoAnswer === false) unipusSweepEnabled = false;
           if (data && typeof data.deepseekApiKey === "string") {
             keyInput.value = data.deepseekApiKey;
             renderKeyStatus(data.deepseekApiKey);
+          }
+          if (data && typeof data.questionBankUrl === "string") {
+            bankUrlInput.value = data.questionBankUrl;
+            renderBankStatus(data.questionBankUrl);
+          }
+          if (data && typeof data.questionBankKey === "string") {
+            bankKeyInput.value = data.questionBankKey;
           }
           if (data && Number(data.videoSpeed) > 0 && activeContext && activeContext.settings) {
             activeContext.settings.videoSpeed = Number(data.videoSpeed);

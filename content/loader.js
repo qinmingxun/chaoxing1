@@ -23,7 +23,12 @@
     showProgress: true,
     cxVideoMode: 'report',
     cxReportBaseInterval: 58,
-    answerIntervalMs: 5000
+    answerIntervalMs: 5000,
+    // 题库 API（唯一题库来源）：未配置时跳过查询，由 DeepSeek 兜底；面板保存后写入。
+    questionBankEnabled: false,
+    questionBankUrl: '',
+    questionBankKey: '',
+    questionBankTimeoutMs: 15000
   });
 
   // [SECTION:LOADER] Hostname adapter registration.

@@ -9,9 +9,11 @@ const DEEPSEEK_DEFAULT_TEMPERATURE = 0.1;
 const DEEPSEEK_DEFAULT_TIMEOUT_MS = 30000;
 const DEEPSEEK_MAX_CONCURRENCY = 3;
 const DEEPSEEK_KEY_PLACEHOLDER = '<YOUR_DEEPSEEK_API_KEY>';
+const QUESTION_BANK_DEFAULT_TIMEOUT_MS = 15000;
 const CHAOXING_HOST_SUFFIXES = ['chaoxing.com'];
 const ALLOWED_MESSAGE_TYPES = new Set([
   'DEEPSEEK_CHAT',
+  'QUESTION_BANK_LOOKUP',
   'CX_STATUS',
   'CX_REPORT',
   'CX_DOCUMENT',
@@ -250,6 +252,150 @@ async function handleDeepSeek(payload) {
   });
 }
 
+// ---- 题库 API（外部题库，唯一题库来源；未配置时直接返回 not-configured，由 DeepSeek 兜底）----
+function resolveQuestionBankUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    return '';
+  }
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return '';
+    }
+    if (parsed.username || parsed.password) {
+      return '';
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return '';
+  }
+}
+
+function normalizeBankAnswerText(value) {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (Array.isArray(value)) {
+    const parts = [];
+    for (const item of value) {
+      let text = '';
+      if (typeof item === 'string') {
+        text = item.trim();
+      } else if (isRecord(item) && typeof item.answer === 'string') {
+        text = item.answer.trim();
+      } else if (isRecord(item) && typeof item.value === 'string') {
+        text = item.value.trim();
+      }
+      if (text) {
+        parts.push(text);
+      }
+    }
+    // 多空与 DeepSeek 约定一致：# 分隔。
+    return parts.join('#').trim();
+  }
+  if (isRecord(value)) {
+    return normalizeBankAnswerText(value.answer !== undefined ? value.answer : value.value);
+  }
+  return '';
+}
+
+function pickBankAnswer(body) {
+  if (!isRecord(body)) {
+    return '';
+  }
+  const data = isRecord(body.data) ? body.data : null;
+  const result = isRecord(body.result) ? body.result : null;
+  const candidates = [
+    body.answer,
+    body.answers,
+    body.value,
+    data ? data.answer : undefined,
+    data ? data.answers : undefined,
+    result ? result.answer : undefined,
+    result ? result.answers : undefined
+  ];
+  for (const candidate of candidates) {
+    const answer = normalizeBankAnswerText(candidate);
+    if (answer) {
+      return answer;
+    }
+  }
+  return '';
+}
+
+function assertQuestionBankPayload(payload) {
+  if (!isRecord(payload)) {
+    throw new RequestError('INVALID_PAYLOAD', 'payload must be an object', false);
+  }
+  const domain = requireString(payload, 'domain');
+  if (!/^[a-z0-9.-]+$/i.test(domain) || domain.includes('..')) {
+    throw new RequestError('INVALID_FIELD', 'domain is invalid', false);
+  }
+  const qtype = requireInteger(payload, 'qtype');
+  if (![0, 1, 2, 3, 4].includes(qtype)) {
+    throw new RequestError('INVALID_FIELD', 'qtype is invalid', false);
+  }
+  const stem = requireString(payload, 'stem');
+  if (!Array.isArray(payload.options) || payload.options.some((option) => typeof option !== 'string')) {
+    throw new RequestError('INVALID_FIELD', 'options must be a string array', false);
+  }
+  return { domain, qtype, stem, options: payload.options };
+}
+
+async function handleQuestionBankLookup(payload) {
+  const request = assertQuestionBankPayload(payload);
+  const stored = await readStorage([
+    'questionBankEnabled',
+    'questionBankUrl',
+    'questionBankKey',
+    'questionBankTimeoutMs'
+  ]);
+  if (stored.questionBankEnabled === false) {
+    return { found: false, reason: 'disabled' };
+  }
+  const bankUrl = resolveQuestionBankUrl(stored.questionBankUrl);
+  if (!bankUrl) {
+    return { found: false, reason: 'not-configured' };
+  }
+  const bankKey = typeof stored.questionBankKey === 'string' ? stored.questionBankKey.trim() : '';
+  const timeoutMs = Number.isInteger(stored.questionBankTimeoutMs) && stored.questionBankTimeoutMs >= 1
+    ? stored.questionBankTimeoutMs
+    : QUESTION_BANK_DEFAULT_TIMEOUT_MS;
+  const headers = { 'Content-Type': 'application/json' };
+  if (bankKey) {
+    headers.Authorization = `Bearer ${bankKey}`;
+  }
+  return withDeepSeekSlot(async () => {
+    const response = await fetchWithTimeout(bankUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        domain: request.domain,
+        qtype: request.qtype,
+        stem: request.stem,
+        options: request.options
+      })
+    }, timeoutMs);
+    let body;
+    try {
+      body = await response.json();
+    } catch (_error) {
+      throw new RequestError('BAD_RESPONSE', '题库 API 响应不是合法 JSON', true);
+    }
+    if (!response.ok) {
+      const message = body && body.error && typeof body.error.message === 'string'
+        ? body.error.message
+        : `题库 API HTTP ${response.status}`;
+      throw new RequestError('QUESTION_BANK_HTTP_ERROR', message, response.status >= 500 || response.status === 429);
+    }
+    const answer = pickBankAnswer(body);
+    if (!answer) {
+      return { found: false, reason: 'not-found' };
+    }
+    return { found: true, answer, source: 'question-bank' };
+  });
+}
+
 function buildStatusUrl(payload) {
   const origin = assertPlainOrigin(requireString(payload, 'origin'));
   const objectId = requireString(payload, 'objectId');
@@ -363,6 +509,8 @@ async function dispatchMessage(message) {
   switch (message.type) {
     case 'DEEPSEEK_CHAT':
       return handleDeepSeek(message.payload);
+    case 'QUESTION_BANK_LOOKUP':
+      return handleQuestionBankLookup(message.payload);
     case 'CX_STATUS':
     case 'CX_REPORT':
     case 'CX_DOCUMENT':

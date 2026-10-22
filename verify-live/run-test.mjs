@@ -150,7 +150,7 @@ async function main() {
       await snd('Runtime.enable');
       const rr = await snd('Runtime.evaluate', { expression: `
         new Promise((done) => {
-          chrome.storage.local.set({ deepseekApiKey: 'test-key-for-mock', deepseekModel: 'deepseek-chat', autoAnswer: true, autoSubmit: true, deepseekTimeoutMs: 8000, deepseekApiBase: 'https://u.unipus.cn:9445/v1/chat/completions' },
+          chrome.storage.local.set({ deepseekApiKey: 'test-key-for-mock', deepseekModel: 'deepseek-chat', autoAnswer: true, autoSubmit: true, deepseekTimeoutMs: 8000, deepseekApiBase: 'https://u.unipus.cn:9445/v1/chat/completions', questionBankUrl: 'https://u.unipus.cn:9445/__bank', questionBankKey: 'bank-test-key', questionBankEnabled: true, questionBankTimeoutMs: 5000 },
             () => done(chrome.runtime.lastError ? 'ERR:' + chrome.runtime.lastError.message : 'ok'));
         })`, awaitPromise: true, returnByValue: true });
       log('re-preset via SW: ' + rr.result.value);
@@ -181,7 +181,12 @@ async function main() {
             deepseekModel: 'deepseek-chat',
             autoAnswer: true,
             autoSubmit: true,
-            deepseekTimeoutMs: 8000
+            deepseekTimeoutMs: 8000,
+            deepseekApiBase: 'https://u.unipus.cn:9445/v1/chat/completions',
+            questionBankUrl: 'https://u.unipus.cn:9445/__bank',
+            questionBankKey: 'bank-test-key',
+            questionBankEnabled: true,
+            questionBankTimeoutMs: 5000
           }, () => {
             const err = chrome.runtime.lastError;
             done(err ? 'SET-ERROR: ' + err.message : 'preset-ok');
@@ -274,14 +279,16 @@ async function main() {
   console.log((serverState.submissions === 2 ? 'PASS' : 'FAIL') + ' 两次提交（page1 语音 + page2 判断/填空），服务器收到 ' + serverState.submissions);
   console.log((cycle.stopOk ? 'PASS' : 'FAIL') + ' 语音题录音已停止（第 1 页）');
   console.log((cycle.micClicks >= 1 ? 'PASS' : 'FAIL') + ' 录音开始按钮被扩展点击（micClicks=' + cycle.micClicks + '，停止被拒 ' + (cycle.stopRejected || 0) + ' 次）');
-  console.log((serverState.deepseekCalls >= 2 ? 'PASS' : 'FAIL') + ' DeepSeek mock 被调用（判断+填空，共 ' + serverState.deepseekCalls + ' 次）');
-  console.log((cycle.selectedOption === 'B. 错' ? 'PASS' : 'FAIL') + ' 判断题选中 mock 答案 B（实际：' + (cycle.selectedOption || 'none') + '）');
-  console.log((cycle.fillValue === 'blue' ? 'PASS' : 'FAIL') + ' 填空题填入 mock 答案 blue（实际：' + (cycle.fillValue || 'empty') + '）');
+  console.log((serverState.bankCalls >= 2 ? 'PASS' : 'FAIL') + ' 题库 API 优先查询（判断+填空，共 ' + serverState.bankCalls + ' 次，auth=' + serverState.lastBankAuth + '）');
+  console.log((serverState.deepseekCalls === 0 ? 'PASS' : 'FAIL') + ' 题库命中后未走 DeepSeek（实际 ' + serverState.deepseekCalls + ' 次）');
+  console.log((cycle.selectedOption === 'B. 错' ? 'PASS' : 'FAIL') + ' 判断题选中题库答案 B（实际：' + (cycle.selectedOption || 'none') + '）');
+  console.log((cycle.fillValue === 'bank-blue' ? 'PASS' : 'FAIL') + ' 填空题填入题库答案 bank-blue（实际：' + (cycle.fillValue || 'empty') + '）');
   console.log((cycle.pagesRendered && cycle.pagesRendered.includes(2) ? 'PASS' : 'FAIL') + ' SPA 翻页到第 2 页（渲染历史：' + JSON.stringify(cycle.pagesRendered) + '）');
   console.log((serverState.quizFetchCount === 2 ? 'PASS' : 'FAIL') + ' 题目 XHR 两次下发（第 1 页 + 翻页后），实际 ' + serverState.quizFetchCount);
   const injectedOk = serverState.submissions === 2; // 提交本身成功（注入改写在 bridge 日志里看）
   const pass = cycle.stopOk && cycle.micClicks >= 1 && serverState.submissions === 2 &&
-    serverState.deepseekCalls >= 2 && cycle.selectedOption === 'B. 错' && cycle.fillValue === 'blue' &&
+    serverState.bankCalls >= 2 && serverState.deepseekCalls === 0 &&
+    cycle.selectedOption === 'B. 错' && cycle.fillValue === 'bank-blue' &&
     cycle.pagesRendered && cycle.pagesRendered.includes(2);
   console.log('\n===== ' + (pass ? 'ALL-PASS ✓' : 'HAS-FAILURES ✗') + ' =====');
 

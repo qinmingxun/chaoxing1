@@ -43,6 +43,7 @@ const ENCRYPTED_PAGES = Object.fromEntries(
 // ---- 状态 ----
 const submissions = [];        // {page, body, injected:boolean}
 const deepseekCalls = [];      // 收到的求解请求
+const bankCalls = [];          // 收到的题库 API 查询
 let quizFetchCount = 0;        // 题目下发次数（第 1 页一次 + 翻页后一次）
 
 
@@ -124,6 +125,23 @@ const server = https.createServer({
     res.end(JSON.stringify({ code: 0, content: ENCRYPTED_PAGES[pageNo], k: KEY }));
     return;
   }
+  // 题库 API mock：判断题回 B；填空题回 bank-blue（与 DeepSeek mock 的 blue 区分，验证题库优先）
+  if (url.pathname === '/__bank' && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      let reqBody = null;
+      try { reqBody = JSON.parse(raw); } catch { /* ignore */ }
+      const isFill = reqBody && reqBody.qtype === 2;
+      const answer = isFill ? 'bank-blue' : 'B';
+      bankCalls.push({ at: Date.now(), qtype: reqBody && reqBody.qtype, answer, auth: req.headers.authorization || null });
+      console.log('[server] 题库 mock: qtype=' + (reqBody && reqBody.qtype) + ' -> ' + answer +
+        ' (auth=' + (req.headers.authorization || 'none') + ')');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ answer: answer }));
+    });
+    return;
+  }
   // DeepSeek mock：判断题固定回 B；填空题回 blue
   if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
     let raw = '';
@@ -172,6 +190,8 @@ const server = https.createServer({
     res.end(JSON.stringify({
       submissions: submissions.length,
       deepseekCalls: deepseekCalls.length,
+      bankCalls: bankCalls.length,
+      lastBankAuth: bankCalls.length ? bankCalls[bankCalls.length - 1].auth : null,
       quizFetchCount,
       lastAnswers: last && last.body && Array.isArray(last.body.quesDatas)
         ? last.body.quesDatas.map((q) => q.answer)
@@ -182,7 +202,7 @@ const server = https.createServer({
   }
   // 重置状态（driver 开场调用，保证断言干净）
   if (url.pathname === '/__testreset' && req.method === 'POST') {
-    submissions.length = 0; deepseekCalls.length = 0; quizFetchCount = 0;
+    submissions.length = 0; deepseekCalls.length = 0; bankCalls.length = 0; quizFetchCount = 0;
     console.log('[server] state reset');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');

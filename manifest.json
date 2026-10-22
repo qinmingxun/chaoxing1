@@ -31,9 +31,12 @@
   "permissions": ["storage", "scripting"],
   "host_permissions": [
     "https://api.deepseek.com/*",
+    "https://*/*",
     "*://*.chaoxing.com/*",
     "*://*.zhihuishu.com/*",
-    "*://*.unipus.cn/*"
+    "*://*.unipus.cn/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "web_accessible_resources": [
     {

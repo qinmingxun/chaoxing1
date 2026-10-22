@@ -214,19 +214,35 @@
     }
   },
   "next": [
-    "P0 真机验证（待用户配 Key）：平台「还有 N 道题没有作答」是否降为 0 —— isDone 注入已离线验证通过（v56）",
+    "P0 题库 API 接入已完成（v57，离线 ALL-PASS）：service-worker QUESTION_BANK_LOOKUP → 题库命中优先，未命中/未配置/失败回退 DeepSeek；面板可填地址+Key，答案写入本地缓存",
+    "P0 真机验证（待用户配 Key 与题库地址）：平台「还有 N 道题没有作答」是否降为 0 —— isDone 注入已离线验证通过（v56）",
     "P1：下拉题支持（.ant-select / .ant-dropdown-trigger / li.select-option）",
     "P1：排序/拖拽题支持（#sortableListWrapper + Touch 事件序列；普通版 sequence-pc-card--item）",
     "P1：itest 混合题型（qindex 属性的 radio + blankinput）",
     "P2：章节跳过清单（SkipManager）、刷新后自动恢复挂机、页内 toast + 进度浮窗",
     "P3：英音/美音选择、录音时长与延迟可调",
-    "题库：本环境未找到可用资源（web_search 无 Key、GitHub 隧道仅 git 协议）；若用户提供 txt/json，按 uNgM + 子章节格式实现导入匹配"
+    "题库：已改为外部 API（用户自填地址/Key）；仍未找到公开可用的题库服务，面板已就绪，填入即生效"
   ],
   "blocked": [
-    "P0 真机验证需要用户在页内面板配置 DeepSeek API Key（否则选择题/填空题无答案可注入）"
+    "P0 真机验证需要用户在页内面板配置 DeepSeek API Key 与题库 API 地址（否则选择题/填空题只能走 DeepSeek 或无法作答）"
   ],
-  "last_updated": "2026-10-21T14:07:42.389Z",
-  "current_version": "v2026-10-20.56",
+  "last_updated": "2026-10-22T05:40:00.000Z",
+  "current_version": "v2026-10-20.57",
+  "handoff_2026_10_22": {
+    "summary": "题库 API 接入（API-only）落地：QUESTION_BANK_LOOKUP（service-worker）→ quiz-solver 优先查题库、命中写缓存，未命中/未配置/失败回退 DeepSeek；页内面板新增题库地址/Key；离线验证台 mock 题库 ALL-PASS（v57）",
+    "key_files": [
+      "background/service-worker.js（QUESTION_BANK_LOOKUP：POST JSON {domain,qtype,stem,options}，Bearer Key，响应兼容 answer/answers/data.answer/result.answer，数组 → # 拼接）",
+      "content/quiz-solver.js（buildQuestionBankPayload + callRequestAnswer 顺序：缓存 → 题库 → DeepSeek；导出 buildQuestionBankPayload）",
+      "content/adapters/unipus.js（页内面板「题库 API」地址 + Key + 状态显示）",
+      "content/loader.js（questionBankEnabled/Url/Key/TimeoutMs 默认值）",
+      "manifest.json（host_permissions 增加 https://*/* 与本地 http，题库域名不固定）",
+      "verify-live/server.mjs（/__bank mock + bankCalls 统计）；verify-live/run-test.mjs（断言题库优先、DeepSeek 0 次）"
+    ],
+    "verify_commands": [
+      "node --check background/service-worker.js content/quiz-solver.js content/loader.js content/adapters/unipus.js",
+      "cd verify-live && node run-test.mjs normal   # 期望 ALL-PASS：题库 2 次、DeepSeek 0 次、填空 bank-blue"
+    ]
+  },
   "handoff_2026_10_21": {
     "summary": "u校园 AI 版整课自动化闭环 + 页内控制面板 + 视频倍速 + P0 isDone 作答标记 全部落地并推送（HEAD 6a78b15）",
     "key_files": [

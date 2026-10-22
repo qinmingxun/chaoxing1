@@ -807,6 +807,23 @@
       return payload;
     }
 
+    function buildQuestionBankPayload(input) {
+      if (!isRecord(input)) {
+        throw new TypeError('quiz request input must be an object');
+      }
+      var qtype = parseQuestionType(input.qtype !== undefined ? input.qtype :
+        (input.type !== undefined ? input.type : input.questionType));
+      if (qtype === null) {
+        throw new TypeError('qtype must be one of 0, 1, 2, 3 or 4');
+      }
+      return {
+        domain: normalizeDomain(input.domain !== undefined ? input.domain : input.location),
+        qtype: qtype,
+        stem: input.cleanedStem !== undefined ? normalizeWhitespace(input.cleanedStem) : cleanStemHtml(input.stem),
+        options: input.options === undefined ? [] : asArray(input.options).map(optionText)
+      };
+    }
+
     function buildCacheGetPayload(key) {
       return { key: toText(key) };
     }
@@ -1250,6 +1267,28 @@
         } catch (cacheGetError) {
           callWarn('读取答题缓存失败，本题继续请求 API。', cacheGetError);
         }
+      }
+
+      // 题库 API（唯一题库来源）：命中直接返回并回写缓存；未配置/未命中/失败时继续 DeepSeek 兜底。
+      try {
+        var bankPayload = buildQuestionBankPayload(requestInput);
+        var bankData = await callBackgroundRequest('QUESTION_BANK_LOOKUP', bankPayload, context || {});
+        if (bankData && bankData.found === true) {
+          var bankAnswer = callAnswerFromData(bankData);
+          if (bankAnswer) {
+            if (cacheKey) {
+              try {
+                await callBackgroundRequest('CACHE_SET',
+                  buildCacheSetPayload(cacheKey, bankAnswer), context || {});
+              } catch (bankCacheSetError) {
+                callWarn('题库答案写入缓存失败，继续填答。', bankCacheSetError);
+              }
+            }
+            return bankAnswer;
+          }
+        }
+      } catch (bankLookupError) {
+        callWarn('题库 API 查询失败，继续 DeepSeek 求解。', bankLookupError);
       }
 
       var payload;
@@ -2003,6 +2042,7 @@
       resolveMd5: resolveMd5,
       buildDeepSeekPayload: buildDeepSeekPayload,
       buildQuizRequestPayload: buildDeepSeekPayload,
+      buildQuestionBankPayload: buildQuestionBankPayload,
       buildCacheGetPayload: buildCacheGetPayload,
       buildCacheSetPayload: buildCacheSetPayload,
       requestAnswer: callRequestAnswer,
