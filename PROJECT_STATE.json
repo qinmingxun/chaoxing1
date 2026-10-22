@@ -238,7 +238,8 @@
       "content/adapters/unipus.js（页内面板「题库 API」地址 + Key + 状态显示）",
       "content/loader.js（questionBankEnabled/Url/Key/TimeoutMs 默认值）",
       "manifest.json（host_permissions 增加 https://*/* 与本地 http，题库域名不固定）",
-      "verify-live/server.mjs（/__bank mock + bankCalls 统计）；verify-live/run-test.mjs（断言题库优先、DeepSeek 0 次）"
+      "verify-live/server.mjs（/__bank mock + bankCalls 统计）；verify-live/run-test.mjs（断言题库优先、DeepSeek 0 次）",
+      "docs/SELFTEST-2026-10-22.md（v58 自测指南：步骤、预期日志、验收清单、排错表）"
     ],
     "verify_commands": [
       "node --check background/service-worker.js content/quiz-solver.js content/loader.js content/adapters/unipus.js",
