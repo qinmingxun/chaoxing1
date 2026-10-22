@@ -4074,8 +4074,14 @@ function buildUnipusUi() {
   bankSave.className = "ch-btn ch-btn-sm";
   bankSave.id = "ch-bank-save";
   bankSave.textContent = "保存";
+  const bankTest = doc.createElement("button");
+  bankTest.className = "ch-btn ch-btn-sm";
+  bankTest.id = "ch-bank-test";
+  bankTest.textContent = "测试";
+  bankTest.title = "保存并用示例题查询一次，验证题库连通性";
   bankUrlRow.appendChild(bankUrlInput);
   bankUrlRow.appendChild(bankSave);
+  bankUrlRow.appendChild(bankTest);
 
   const bankKeyRow = doc.createElement("div");
   bankKeyRow.className = "ch-input-row";
@@ -4102,27 +4108,85 @@ function buildUnipusUi() {
     bankKeyInput.type = bankKeyInput.type === "password" ? "text" : "password";
     bankKeyEye.textContent = bankKeyInput.type === "password" ? "👁" : "🙈";
   });
+  const readBankInputs = () => ({
+    url: String(bankUrlInput.value || "").trim(),
+    key: String(bankKeyInput.value || "").trim()
+  });
+  const saveBankConfig = (url, key) => {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
+      pushUiLog("保存失败：chrome.storage 不可用", true);
+      return false;
+    }
+    chrome.storage.local.set({
+      questionBankUrl: url,
+      questionBankKey: key,
+      questionBankEnabled: Boolean(url)
+    });
+    renderBankStatus(url);
+    return true;
+  };
   bankSave.addEventListener("click", () => {
-    const url = String(bankUrlInput.value || "").trim();
-    const key = String(bankKeyInput.value || "").trim();
+    const { url, key } = readBankInputs();
     if (url && !/^https?:\/\//i.test(url)) {
       pushUiLog("题库 API 地址需以 http(s):// 开头", true);
       return;
     }
+    if (saveBankConfig(url, key)) {
+      pushUiLog(url ? "题库 API 已保存（答题先查题库，未命中走 DeepSeek）" : "题库 API 已清空（只用 DeepSeek）", false);
+    }
+  });
+
+  // 题库连通性测试：保存后用示例题查一次（只读探测，不影响答题流程）
+  bankTest.addEventListener("click", () => {
+    const { url, key } = readBankInputs();
+    if (!url) {
+      pushUiLog("题库测试：请先填写题库地址（留空即只用 DeepSeek，无需测试）", true);
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      pushUiLog("题库测试：地址需以 http(s):// 开头", true);
+      return;
+    }
+    if (!saveBankConfig(url, key)) {
+      return;
+    }
+    pushUiLog("题库测试中…", false);
+    const finish = (text, isError) => pushUiLog("题库测试：" + text, Boolean(isError));
     try {
-      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({
-          questionBankUrl: url,
-          questionBankKey: key,
-          questionBankEnabled: Boolean(url)
-        });
-        renderBankStatus(url);
-        pushUiLog(url ? "题库 API 已保存（答题先查题库，未命中走 DeepSeek）" : "题库 API 已清空（只用 DeepSeek）", false);
-      } else {
-        pushUiLog("保存失败：chrome.storage 不可用", true);
-      }
-    } catch (_bankSaveError) {
-      pushUiLog("保存失败：" + (_bankSaveError && _bankSaveError.message ? _bankSaveError.message : "未知错误"), true);
+      const domainHost = (typeof location !== "undefined" && location.hostname) ? location.hostname : "u.unipus.cn";
+      chrome.runtime.sendMessage({
+        type: "QUESTION_BANK_LOOKUP",
+        requestId: "bank-test-" + Date.now(),
+        payload: {
+          domain: domainHost,
+          qtype: 3,
+          stem: "（题库连通性测试）地球是圆的",
+          options: ["A. 对", "B. 错"]
+        }
+      }, (res) => {
+        try {
+          if (chrome.runtime.lastError) {
+            finish("请求失败（" + chrome.runtime.lastError.message + "）", true);
+            return;
+          }
+          if (!res || res.ok !== true) {
+            finish("失败（" + ((res && res.error && res.error.message) || "未知错误") + "）", true);
+            return;
+          }
+          const data = res.data || {};
+          if (data.found === true) {
+            finish("命中 ✓ 返回答案「" + data.answer + "」", false);
+          } else if (data.reason === "not-configured" || data.reason === "disabled") {
+            finish("未生效（" + data.reason + "）", true);
+          } else {
+            finish("未命中（" + (data.reason || "not-found") + "）——答题时会回退 DeepSeek", false);
+          }
+        } catch (_cbError) {
+          finish("回调异常：" + (_cbError && _cbError.message ? _cbError.message : "未知错误"), true);
+        }
+      });
+    } catch (_testError) {
+      finish("异常：" + (_testError && _testError.message ? _testError.message : "未知错误"), true);
     }
   });
 

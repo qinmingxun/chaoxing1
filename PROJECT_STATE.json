@@ -215,6 +215,7 @@
   },
   "next": [
     "P0 题库 API 接入已完成（v57，离线 ALL-PASS）：service-worker QUESTION_BANK_LOOKUP → 题库命中优先，未命中/未配置/失败回退 DeepSeek；面板可填地址+Key，答案写入本地缓存",
+    "P0 题库 API 连通性测试按钮已完成（v58，真机 9/9 PASS）：面板「测试」一键保存+示例题查询，日志显示命中/未命中/失败，Bearer Key 透传验证通过",
     "P0 真机 UI 验证已完成（8/8 PASS）：真实课程页 v57 面板、题库地址保存→刷新回填→清空恢复、停止态不被误触发；DeepSeek Key 已配置",
     "P0 待用户手动端到端：浏览器已登录、扩展 v57 就绪、当前为「停止刷课」状态 —— 点「开始刷课」跑一轮，确认「还有 N 道题没有作答」是否归零（isDone + 题库答案）",
     "P1：下拉题支持（.ant-select / .ant-dropdown-trigger / li.select-option）",
@@ -227,8 +228,8 @@
   "blocked": [
     "P0 手动端到端测试需用户点击「开始刷课」（当前为停止态，避免自动操作真实课程）；题库 API 地址/Key 由用户决定是否提供"
   ],
-  "last_updated": "2026-10-22T06:05:00.000Z",
-  "current_version": "v2026-10-20.57",
+  "last_updated": "2026-10-22T06:12:00.000Z",
+  "current_version": "v2026-10-20.58",
   "handoff_2026_10_22": {
     "summary": "题库 API 接入（API-only）落地：QUESTION_BANK_LOOKUP（service-worker）→ quiz-solver 优先查题库、命中写缓存，未命中/未配置/失败回退 DeepSeek；页内面板新增题库地址/Key；离线验证台 mock 题库 ALL-PASS（v57）；真机面板 8/8 PASS（保存/持久化/清空/停止态保持）",
     "key_files": [
