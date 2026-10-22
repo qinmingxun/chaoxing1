@@ -3419,6 +3419,26 @@ function findNextTocItem(doc) {
 }
 
 // 在页脚候选（用户实测 selector）中按文本/伪元素文本查找链接。
+// 2026-10-22（用户反馈 6-6 Role-playing）：u校园小节内有多子标签
+// （Note them down / Get the skills / Role-play it / More for role-playing），
+// 当前标签可能只有"听/看"内容（视频播完），题目在别的标签里。空闲时先尝试
+// 切换到未激活的子标签，避免整页判为"无题可答"直接跳节。
+function findInactiveSubTab(doc) {
+  if (!doc) return null;
+  const tabs = safeQueryAll(doc, '.pc-header-tabs-container .ant-col.tab');
+  for (const tab of tabs) {
+    try {
+      const cls = asString(tab.className);
+      if (/pc-header-tab-activity|(^|[-_\s])active([-_\s]|$)/.test(cls)) continue;
+      if (!isElementVisible(tab)) continue;
+      const name = asString(tab.textContent).replace(/\s+/g, '');
+      if (!name) continue;
+      return tab;
+    } catch (_tabError) { /* 继续下一个 */ }
+  }
+  return null;
+}
+
 function findFootLinkByText(doc, pattern) {
   if (!doc || typeof doc.querySelectorAll !== "function") return null;
   const seen = new Set();
@@ -3495,6 +3515,8 @@ function pollAutoContinue(context) {
 // "有交互内容"包括：录音位、题目容器/选项/输入框、页脚按钮、音视频、iframe、textarea
 // ——出现任意一种都视为正常页面，不推进（避免误跳过视频/听力页）。
 const IDLE_ADVANCE_MS = 12000;
+// 同页推进失败后的冷却重试间隔（2026-10-22：旧逻辑每页只推一次，点击无效会永久卡死）。
+const IDLE_ADVANCE_RETRY_MS = 90000;
 // 卡死逃生：页面【有题目】但适配器长时间没有任何动作（题型未覆盖、题目数据未到达等）
 // → 兜底点页脚"提交/下一题"推进，避免整课循环永久死锁（实测：6-4 Viewing 有 2 道
 // textarea 题但适配器"未获取到任何题目"）。阈值取大一些，避免抢在数据到达前误提交。
@@ -3505,7 +3527,7 @@ const STUCK_ESCAPE_FAST_MS = 20000;
 // 适配器最近一次确认"无题可答"的时间戳（0 = 未确认）。
 let unipusNoQuestionConfirmedAt = 0;
 const IDLE_WATCH_INTERVAL_MS = 5000;
-const idleWatchState = { timer: null, lastActivityAt: 0, advancedHash: "", lastSignature: "" };
+const idleWatchState = { timer: null, lastActivityAt: 0, advancedHash: "", lastSignature: "", triedTabs: null, scrolledHash: "", lastAdvanceAt: 0 };
 
 function unipusPageSignature(context) {
   try {
@@ -3594,25 +3616,75 @@ function startUnipusIdleWatcher(context) {
         ? (noQuestionConfirmed ? STUCK_ESCAPE_FAST_MS : STUCK_ESCAPE_MS)
         : IDLE_ADVANCE_MS;
       if (idleMs < threshold) return;
-      if (idleWatchState.advancedHash === hash) return; // 每页只推一次
+      // 每页推进改为"冷却重试"（2026-10-22 实测 6-8 听力页卡死）：旧逻辑
+      // advancedHash 每页只推一次，若首次点击无效（题目懒加载未渲染/资源未就绪），
+      // 该页会永久卡住。改为同页每 90s 可重试一次。
+      if (idleWatchState.advancedHash === hash &&
+          Date.now() - (idleWatchState.lastAdvanceAt || 0) < IDLE_ADVANCE_RETRY_MS) {
+        return;
+      }
+      // 情况 -1：先滚动到页面底部，触发题目区懒加载（听力/阅读长页常见）。
+      // 每页只滚一次，滚动后重置空闲计时给内容渲染留时间。
+      if (idleWatchState.scrolledHash !== hash) {
+        idleWatchState.scrolledHash = hash;
+        try {
+          const scroller = doc.scrollingElement || doc.documentElement;
+          if (scroller) scroller.scrollTop = scroller.scrollHeight;
+          const area = doc.querySelector(".pc-content, #pc-content, .layout-reply-container, .pc-reply-container");
+          if (area && typeof area.scrollIntoView === "function") area.scrollIntoView({ block: "end" });
+          unipusLog(context, "u校园空闲推进：滚动到页面底部以触发题目懒加载。");
+        } catch (_scrollError) { /* 滚动失败继续尝试推进 */ }
+        idleWatchState.lastActivityAt = Date.now();
+        return;
+      }
+      // 情况 0（2026-10-22 用户反馈 6-6）：同页存在未激活子标签 → 先切换子标签。
+      // 6-6 的结构是 4 个子标签，题目/填空在 Note them down，而当前停在 Get the skills
+      // （只有讲解视频，播完即无题可答）→ 旧逻辑会误以为整页无内容并跳节。
+      const pendingTab = findInactiveSubTab(doc);
+      if (pendingTab) {
+        const tabName = asString(pendingTab.textContent).replace(/\s+/g, "");
+        const tabKey = hash + "::" + tabName;
+        if (!idleWatchState.triedTabs) idleWatchState.triedTabs = new Set();
+        if (!idleWatchState.triedTabs.has(tabKey)) {
+          idleWatchState.triedTabs.add(tabKey);
+          if (clickWithPointerSequence(context, pendingTab)) {
+            unipusLog(context,
+              `u校园子标签推进：当前子标签无可答内容，切换到「${tabName.slice(0, 20)}」。`);
+            return;
+          }
+        }
+      }
       // 情况 A：无题目但页脚有按钮（实测 6-4 Viewing 导语页：页脚有"提交"却无可答题目）
       // ——直接点它推进；否则会卡住（看门狗因"有可见按钮"不推进，自动提交又因"无题目"不触发）。
       const footAction = findFootLinkByText(doc, /提交|下一题|继续学习/);
       if (footAction) {
-        idleWatchState.advancedHash = hash;
-        if (clickWithPointerSequence(context, footAction)) {
-          unipusLog(context,
-            `u校园空闲推进：页面无适配器可处理的动作（题题型未覆盖或已作答）且空闲 ${Math.round(idleMs / 1000)}s，点击页脚按钮推进（${describeElement(footAction)}）。`);
+        // 同页连续点"下一题/提交"无效（页面 hash 不变）时，最多试 3 次，
+        // 之后落到情况 B 点左侧目录下一节，避免在未覆盖题型页（如 itest 听力选择）
+        // 上无限循环点按钮（2026-10-22 实测 6-8 卡死）。
+        idleWatchState.advanceAttempts = idleWatchState.advanceAttempts || {};
+        const attempts = idleWatchState.advanceAttempts[hash] || 0;
+        if (attempts < 3) {
+          idleWatchState.advanceAttempts[hash] = attempts + 1;
+          idleWatchState.advancedHash = hash;
+          idleWatchState.lastAdvanceAt = Date.now();
+          if (clickWithPointerSequence(context, footAction)) {
+            unipusLog(context,
+              `u校园空闲推进：页面无适配器可处理的动作（题题型未覆盖或已作答）且空闲 ${Math.round(idleMs / 1000)}s，点击页脚按钮推进（${describeElement(footAction)}，第 ${attempts + 1}/3 次）。`);
+          }
+          return;
         }
-        return;
+        unipusLog(context,
+          `u校园空闲推进：页脚按钮连续 ${attempts} 次无效，改为进入左侧目录下一节。`);
       }
       // 情况 B：页脚为空 → 点左侧目录的下一节。
       const nextToc = findNextTocItem(doc);
       if (!nextToc) {
         idleWatchState.advancedHash = hash; // 已是最后一节，不再重复尝试
+        idleWatchState.lastAdvanceAt = Date.now();
         return;
       }
       idleWatchState.advancedHash = hash;
+      idleWatchState.lastAdvanceAt = Date.now();
       if (clickWithPointerSequence(context, nextToc)) {
         unipusLog(context,
           `u校园目录推进：当前页无题目/按钮且空闲 ${Math.round(idleMs / 1000)}s，自动进入下一节（${describeElement(nextToc)}）。`);
@@ -3798,6 +3870,59 @@ function applyUnipusVideoPolicy(context) {
         }
       }
     } catch (_videoError) { /* 单个视频异常不影响其它 */ }
+  }
+  // 2026-10-22（用户反馈 6-6/6-7 听力填空）：听力节用 <audio> 而非 <video>，
+  // 旧策略只接管 video → 音频不播、填空输入框不渲染、流程卡死。此处同样接管 audio
+  // （自动播放 + 倍速；被拒时静音重试）。
+  let audios = [];
+  try {
+    audios = Array.prototype.slice.call(doc.querySelectorAll("audio"));
+  } catch (_audioQueryError) {
+    audios = [];
+  }
+  for (const audio of audios) {
+    try {
+      if (audio.__chAudioHandled !== true) {
+        audio.__chAudioHandled = true;
+        audio.addEventListener("ratechange", () => {
+          try {
+            if (Math.abs(audio.playbackRate - readUnipusVideoRate(context)) > 0.01) {
+              audio.playbackRate = readUnipusVideoRate(context);
+            }
+          } catch (_audioRateError) { /* 只读媒体对象忽略 */ }
+        });
+        audio.addEventListener("play", () => {
+          try { audio.playbackRate = readUnipusVideoRate(context); } catch (_audioPlayError) {}
+        });
+        unipusLog(context, `u校园音频：已接管听力音频（目标倍速 ${rate}x，自动播放）。`);
+      }
+      if (Math.abs(audio.playbackRate - rate) > 0.01) {
+        audio.playbackRate = rate;
+      }
+      if (audio.paused && !audio.ended && audio.readyState >= 2) {
+        const audioPlay = audio.play();
+        if (audioPlay && typeof audioPlay.catch === "function") {
+          audioPlay.catch(() => {
+            // 自动播放被拒 → 静音后重试；仍被拒（浏览器要求 user gesture）时
+            // 打一次提示，告知用户点一下页面即可（每个音频元素只提示一次）。
+            try {
+              audio.muted = true;
+              audio.volume = 0;
+              const retryAudio = audio.play();
+              if (retryAudio && typeof retryAudio.catch === "function") {
+                retryAudio.catch(() => {
+                  if (audio.__chAudioBlockedLogged !== true) {
+                    audio.__chAudioBlockedLogged = true;
+                    unipusWarn(context,
+                      "u校园音频：浏览器自动播放策略拦截了听力音频——请在页面任意位置点击一次（或手点「开始刷课」），之后会自动播放。");
+                  }
+                });
+              }
+            } catch (_audioMuteError) { /* 忽略 */ }
+          });
+        }
+      }
+    } catch (_audioError) { /* 单个音频异常不影响其它 */ }
   }
 }
 
