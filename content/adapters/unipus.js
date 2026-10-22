@@ -2098,8 +2098,25 @@ export async function runAutoAnswer(ctx) {
   }
   // 整页只有语音题（无任何可求解题目）时也自动提交：占位空答案翻页。
   const voiceOnlyPage = hasVoiceQuestions && solvableQuestions.length === 0;
-  if ((pageFilled > 0 || choiceSolved || voiceOnlyPage) &&
+  // 兜底（2026-10-22 实测 6-6 Role-playing 卡死）：页面有题目但无任何可填控件
+  // （无文本输入框 / 无选项点击 / 无录音位），页脚却存在「提 交」——旧逻辑
+  // 三个条件都不满足 → 永不调度提交 → 整课卡死。此处仍调度提交：平台校验
+  // 失败会走既有「硬拦截 → 目录下一节」路径，保证推进不卡死。
+  let noControlSubmitFallback = false;
+  if (!pageFilled && !choiceSolved && !voiceOnlyPage) {
+    try {
+      const submitHit = findSubmitButton(getContextDocument(context));
+      noControlSubmitFallback = Boolean(submitHit && submitHit.element);
+    } catch (_fallbackProbeError) {
+      noControlSubmitFallback = false;
+    }
+  }
+  if ((pageFilled > 0 || choiceSolved || voiceOnlyPage || noControlSubmitFallback) &&
       autoAnswerState.generation === generation) {
+    if (noControlSubmitFallback) {
+      unipusLog(context,
+        "u校园自动提交：页面无任何可填控件但存在「提 交」，兜底提交（校验失败将自动跳过该页）。");
+    }
     scheduleAutoSubmit(context);
   }
   return { started: true, answerCount: answers.length };
@@ -3173,6 +3190,13 @@ function findSubmitButton(doc) {
   const stats = { total: 0, foot: 0, footVisible: 0, withText: 0, texts: [], pseudo: [] };
   let footFallback = null; // 页脚最后一个可见未禁用的链接（提交按钮兜底，通常在页脚末尾）
   const consider = (element, isFoot) => {
+    // 【2026-10-22 真机 bug】提交确认弹窗容器 textContent 含"确认要提交吗"，
+    // 曾被当成交付按钮点击（点弹窗正文无效 → 提交一直失败、整页卡死）。
+    // 提交按钮永远不在弹窗内：先排除弹窗内元素。
+    if (element && element.closest &&
+        element.closest('.ant-modal, .ant-modal-wrap, .ant-modal-root, [role="dialog"]')) {
+      return null;
+    }
     // 2026-10-20 实测：普通题页脚按钮文本为"提 交"（含全角/半角空格）——
     // 匹配前压缩空白，"提 交"=="提交"。语音题页为"下一题"。
     const text = asString(element.textContent).replace(/\s+/g, "").trim();

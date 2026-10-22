@@ -2202,12 +2202,10 @@
     // （2026-10-21 离线实测：4 次点击中 3 次来自 keep-alive 的重复轮询）。
     var CLICK_TEXTS = ['确定', '确认'];
 
-    // 去重（2026-10-21 离线实测校准）：旧版"8 秒窗口"在弹窗被刻意保留 14s 时
-    // 会在第 12s 再次点击。改为【永久去重 · 跨实例安全】：
-    //  1) DOM 标记 dataset.chDialogClicked：多 bridge 实例下也只点一次；
-    //  2) WeakSet：同元素永不再点；
-    //  3) 全局 1.2s 节流：防同一轮询周期内点多个按钮。
-    var clickedButtons = new WeakSet();
+    // 去重（2026-10-22 真机修复）：旧版永久去重（WeakSet + dataset=1）在"首次点击
+    // 未生效"（按钮实际是 span、或弹窗未响应）时会永久跳过该按钮 → 提交确认弹窗
+    // 卡死数分钟。改为元素级冷却：同一按钮 8 秒内不重复点，弹窗仍在则到期重试。
+    var CLICK_COOLDOWN_MS = 8000;
     var lastClickAt = 0;
     function isDialogClosing(btn) {
       try {
@@ -2222,34 +2220,46 @@
     function pollDialogs() {
       try {
         var doc = globalWindow.document;
+        // 覆盖 button 与 span 两种按钮形态（2026-10-22 实测：部分确认框的"确定"是
+        // <span>确定</span>，不在 button 选择器内，旧版永远点不到）。
         var buttons = doc.querySelectorAll(
-          '.ant-modal button, .ant-modal .ant-btn, .ant-modal-wrap button, .system-info-cloud-ok-button, [role="dialog"] button');
+          '.ant-modal button, .ant-modal .ant-btn, .ant-modal-wrap button, ' +
+          '.system-info-cloud-ok-button, [role="dialog"] button, ' +
+          '.ant-modal-confirm-btns button, .ant-modal-confirm-btns span, ' +
+          '.system-info-cloud-ok-button span, .ant-modal-wrap span, .ant-modal span');
         var now = Date.now();
         for (var i = 0; i < buttons.length; i += 1) {
           var btn = buttons[i];
           if (!btn) continue;
           if (isDialogClosing(btn)) continue;
           var text = asStringSafe(btn.textContent).replace(/\s+/g, '');
-          if (!text) continue;
+          // 严格等值（长度 ≤4）：避免把含"确认要提交吗"的弹窗正文容器当按钮点击。
+          if (!text || text.length > 4) continue;
           var matched = false;
           for (var k = 0; k < CLICK_TEXTS.length; k += 1) {
-            if (text.indexOf(CLICK_TEXTS[k]) !== -1) { matched = true; break; }
+            if (text === CLICK_TEXTS[k]) { matched = true; break; }
           }
           if (!matched) continue;
           var rect = null;
           try { rect = btn.getBoundingClientRect(); } catch (_rectError) { rect = null; }
           if (!rect || rect.width <= 0 || rect.height <= 0) continue;
-          if (clickedButtons.has(btn)) continue;
-          try { if (btn.dataset && btn.dataset.chDialogClicked === '1') continue; } catch (_dsReadErr) {}
+          var lastAt = 0;
+          try { lastAt = Number((btn.dataset && btn.dataset.chDialogClickedAt) || 0); } catch (_dsReadErr) { lastAt = 0; }
+          if (lastAt && now - lastAt < CLICK_COOLDOWN_MS) continue;
           if (now - lastClickAt < 1200) continue;
-          clickedButtons.add(btn);
-          try { if (btn.dataset) btn.dataset.chDialogClicked = '1'; } catch (_dsWriteErr) {}
+          try { if (btn.dataset) btn.dataset.chDialogClickedAt = String(now); } catch (_dsWriteErr) {}
           lastClickAt = now;
+          // span 形态：上溯到最近的按钮元素再点击（点击 span 通常也能冒泡，但按钮更稳）。
+          var clickTarget = btn;
           try {
-            btn.click();
+            var clickableParent = btn.closest ? btn.closest('button, .ant-btn, [role="button"]') : null;
+            if (clickableParent) clickTarget = clickableParent;
+          } catch (_closestErr) { /* 用原元素 */ }
+          try {
+            clickTarget.click();
           } catch (_clickError) {
             try {
-              btn.dispatchEvent(new globalWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+              clickTarget.dispatchEvent(new globalWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
             } catch (_dispatchError) {}
           }
           console.log('[course-helper] MAIN bridge：自动点击弹窗按钮「' + text + '」。');
