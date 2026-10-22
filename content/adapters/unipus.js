@@ -2979,7 +2979,13 @@ async function simulateVoiceRecordingsInner(context) {
   }
   const count = initialButtons.length;
   const maxQuestions = 45; // 上限保护（一页题数未知，跨多个 Practice 组时可能达 19+ 题）
-  setUnipusPanelStatus(`状态：语音题处理中 0/${count}`, "warn");
+  // 进度显示封顶：跨练习组时 questionIndex 会超过初始可见录音位数（实测出现 8/7、10/7），
+  // 显示层取 min 避免误导；真实题数以循环内动态探测为准。
+  const setVoiceProgress = (doneCount) => {
+    const shown = Math.min(Math.max(0, doneCount), count);
+    setUnipusPanelStatus(`状态：语音题处理中 ${shown}/${count}`, "warn");
+  };
+  setVoiceProgress(0);
   unipusLog(context,
     `u校园语音题：逐题循环开始（当前可见录音位 ${count} 个；每题：录音 ${VOICE_RECORD_DURATION_MS}ms → 停止 → 下一题，直到页脚出现"提 交"）。`);
   let questionIndex = 0;
@@ -2993,7 +2999,7 @@ async function simulateVoiceRecordingsInner(context) {
     }
     // 每轮重新取 document（SPA 翻页可能替换 document，避免旧引用失效）。
     const docNow = getContextDocument(context);
-    setUnipusPanelStatus(`状态：语音题处理中 ${questionIndex + 1}/${count}`, "warn");
+    setVoiceProgress(questionIndex + 1);
     // 每轮实时查询录音位（切题后 React 重渲染，旧引用失效）。
     const startButtons = collectRecordButtons(docNow);
     if (!startButtons.length) {
