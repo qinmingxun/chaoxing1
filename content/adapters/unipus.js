@@ -4058,7 +4058,8 @@ function buildUnipusUi() {
   bankLabel.className = "ch-label";
   bankLabel.textContent = "题库 API";
   const bankStatus = doc.createElement("span");
-  bankStatus.className = "ch-status ch-key-status";
+  bankStatus.className = "ch-status";
+  bankStatus.id = "ch-bank-status";
   bankLabelRow.appendChild(bankLabel);
   bankLabelRow.appendChild(bankStatus);
 
