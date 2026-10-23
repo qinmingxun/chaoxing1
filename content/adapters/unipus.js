@@ -131,13 +131,14 @@ const DOM_OPTION_SELECTOR_CANDIDATES = Object.freeze([
 
 // ---- 题型：题干前缀提取与映射（与 quiz-solver 的 qtype 0–4 一致）----
 const UNIPUS_QUIZ_TYPE_RE =
-  /(?:【|\[|（|\()\s*(单项选择题?|多项选择题?|单选题?|多选题?|填空题?|判断题?|简答题?|问答题?)\s*(?:】|\]|）|\))/;
+  /(?:【|\[|（|\()\s*(单项选择题?|多项选择题?|单选题?|多选题?|填空题?|判断题?|简答题?|问答题?|排序题?|拖拽题?|拖拽排序题?)\s*(?:】|\]|）|\))/;
 const UNIPUS_QUIZ_TYPE_MAP = Object.freeze({
   单选: 0, 单选题: 0, 单项选择: 0, 单项选择题: 0,
   多选: 1, 多选题: 1, 多项选择: 1, 多项选择题: 1,
   填空: 2, 填空题: 2,
   判断: 3, 判断题: 3,
   简答: 4, 简答题: 4, 问答: 4, 问答题: 4,
+  排序: 5, 排序题: 5, 拖拽: 5, 拖拽题: 5, 拖拽排序: 5, 拖拽排序题: 5,
 });
 // 判断题选项文本（题干未标【判断】但选项仅两枚对/错时映射 qtype 3，需在真实页面核对）
 const TRUE_FALSE_OPTION_TEXT_RE = /^(?:对|错|正确|错误|是|否|√|×|true|false)$/i;
@@ -1351,6 +1352,17 @@ function buildDomQuestion(container) {
 
   if (qtype === null) {
     // 前缀未命中：按 DOM 结构推断（需在真实页面核对）
+    // 2026-10-23：先检测排序/拖拽题（.sortable-list-wrapper / .sequence-container / .sequence-pc-card）
+    const sortableWrapper = safeQuery(container, '.sortable-list-wrapper, .sequence-container, .sequence-pc-card, [class*="sortable"], [class*="sequence"]');
+    if (sortableWrapper) {
+      const sortableItems = safeQueryAll(sortableWrapper, 'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item');
+      if (sortableItems.length >= 2) {
+        qtype = 5; // 排序/拖拽题
+        unipusLog(activeContext, `u校园检测到排序题（qtype=5），容器: ${sortableWrapper.className || sortableWrapper.tagName}，选项 ${sortableItems.length} 个`);
+      }
+    }
+    if (qtype === null) {
+    // 前缀未命中：按 DOM 结构推断（需在真实页面核对）
     if (choiceInputs.length) {
       qtype = choiceInputs.some((input) => asString(input.type).toLowerCase() === "checkbox") ? 1 : 0;
     } else if (textInputs.length) {
@@ -1373,7 +1385,19 @@ function buildDomQuestion(container) {
     });
   }
 
-  if (!textInputs.length) return null;
+  // 排序/拖拽题 (qtype = 5)
+  if (qtype === 5) {
+    const sortableWrapper = safeQuery(container, '.sortable-list-wrapper, .sequence-container, .sequence-pc-card, [class*="sortable"], [class*="sequence"]');
+    const sortableItems = sortableWrapper ? safeQueryAll(sortableWrapper, 'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item') : [];
+    return {
+      qtype: 5,
+      stem: stemHtml,
+      options: [],
+      sortableWrapper,
+      sortableItems,
+      isAnswered: () => false, // 排序题暂不支持已答检测
+    };
+  }
   return {
     qtype,
     stem: stemHtml,

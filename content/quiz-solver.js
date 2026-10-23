@@ -18,11 +18,13 @@
       FILL: 2,
       TRUE_FALSE: 3,
       SHORT_ANSWER: 4,
+      SORTABLE: 5,
       SINGLE_CHOICE: 0,
       MULTIPLE_CHOICE: 1,
       FILL_BLANK: 2,
       JUDGMENT: 3,
-      SHORT: 4
+      SHORT: 4,
+      DRAG_DROP: 5
     });
 
     var QUESTION_TYPE_MAP = Object.freeze({
@@ -31,6 +33,7 @@
       '2': 2,
       '3': 3,
       '4': 4,
+      '5': 5,
       '单选': 0,
       '单选题': 0,
       '单项选择': 0,
@@ -64,10 +67,18 @@
       '简答': 4,
       '简答题': 4,
       '问答': 4,
-      '问答题': 4
+      '问答题': 4,
+      'sortable': 5,
+      'dragdrop': 5,
+      'drag-drop': 5,
+      '排序': 5,
+      '拖拽': 5,
+      '拖拽排序': 5,
+      'drag': 5,
+      'drop': 5
     });
 
-    var QUESTION_TYPE_WORDS = '(?:单项选择题?|单选题?|多项选择题?|多选题?|填空题?|判断题?|简答题?|问答题?|single\\s*choice|multiple\\s*choice|fill\\s*(?:in\\s*)?the\\s*blank|true\\s*/?\\s*false|short\\s*answer|essay)';
+    var QUESTION_TYPE_WORDS = '(?:单项选择题?|单选题?|多项选择题?|多选题?|填空题?|判断题?|简答题?|问答题?|single\\s*choice|multiple\\s*choice|fill\\s*(?:in\\s*)?the\\s*blank|true\\s*/?\\s*false|short\\s*answer|essay|排序题|拖拽题|拖拽排序|drag\\s*(?:and\\s*)?drop|sortable)';
     var QUESTION_TYPE_PREFIX_RE = new RegExp(
       '^\\s*(?:(?:【|\\[|（|\\()\\s*' + QUESTION_TYPE_WORDS +
         '\\s*(?:】|\\]|）|\\))|(?:' + QUESTION_TYPE_WORDS + ')\\s*[:：])\\s*',
@@ -1804,6 +1815,141 @@
       return { filled: false, skipped: true, reason: 'no-fill-action' };
     }
 
+    async function callFillSortableAnswer(question, answer, context, helpers) {
+      // 排序/拖拽题（qtype=5）：通过 Touch 事件序列模拟拖拽
+      // answer 格式预期：数组，如 ["选项C", "选项A", "选项B"] 表示正确顺序
+      // question.sortableWrapper: 排序容器元素
+      // question.sortableItems: 可拖拽元素数组
+      
+      var sortableWrapper = question && question.sortableWrapper;
+      var sortableItems = question && question.sortableItems;
+      if (!sortableWrapper || !sortableItems || !sortableItems.length) {
+        return { filled: false, skipped: true, reason: 'no-sortable-elements' };
+      }
+      
+      var text = answer === null || answer === undefined ? '' : String(answer);
+      var targetOrder = [];
+      try {
+        // 解析答案：支持 "A,B,C" 或 ["A","B","C"] 或 "选项C,选项A,选项B"
+        if (Array.isArray(answer)) {
+          targetOrder = answer.map(String);
+        } else if (typeof answer === 'string') {
+          // 尝试解析为数组
+          var parsed = text.split(/[,，#]/).map(s => s.trim()).filter(Boolean);
+          targetOrder = parsed.length ? parsed : [String(answer)];
+        } else {
+          targetOrder = [String(answer)];
+        }
+      } catch (_e) {
+        targetOrder = [String(answer)];
+      }
+      
+      if (!targetOrder.length) {
+        return { filled: false, skipped: true, reason: 'empty-answer' };
+      }
+      
+      try {
+        // 获取当前页面中的可拖拽元素（实时查询，因为页面可能重渲染）
+        var doc = question.sortableWrapper ? question.sortableWrapper.ownerDocument : document;
+        var currentWrapper = doc.querySelector('.sortable-list-wrapper, .sequence-container, .sequence-pc-card, [class*="sortable"], [class*="sequence"]');
+        if (!currentWrapper) {
+          return { filled: false, skipped: true, reason: 'wrapper-not-found' };
+        }
+        var items = [...currentWrapper.querySelectorAll('li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item')];
+        if (!items.length || items.length < 2) {
+          return { filled: false, skipped: true, reason: 'no-draggable-items' };
+        }
+        
+        // 根据答案文本匹配当前元素的正确位置
+        // 这里简化：假设答案数组顺序即为目标顺序，按顺序拖拽到位
+        // 实际项目中需要根据选项文本匹配
+        var success = true;
+        var moved = 0;
+        
+        for (var i = 0; i < targetOrder.length && i < items.length; i++) {
+          var targetText = targetOrder[i];
+          // 找到包含目标文本的元素
+          var targetItem = null;
+          for (var j = i; j < items.length; j++) {
+            var itemText = (items[j].textContent || '').trim().replace(/\s+/g, ' ');
+            if (itemText.includes(targetText) || targetText.includes(itemText)) {
+              targetItem = items[j];
+              break;
+            }
+          }
+          if (!targetItem) {
+            // 如果找不到精确匹配，按索引直接移动
+            targetItem = items[i];
+          }
+          
+          if (targetItem && targetItem !== items[i]) {
+            // 执行拖拽：将 targetItem 拖拽到位置 i
+            var success = await dragAndDropToIndex(currentWrapper, targetItem, i, items);
+            if (success) {
+              moved++;
+              // 重新获取元素列表（DOM 可能已变化）
+              var currentItems = [...currentWrapper.querySelectorAll('li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item')];
+              items = currentItems;
+            } else {
+              success = false;
+            }
+          }
+        }
+        
+        return { filled: true, skipped: false, moved: moved };
+      } catch (e) {
+        callWarn('排序题填答异常: ' + e.message);
+        return { filled: false, skipped: false, reason: 'sortable-fill-error' };
+      }
+    }
+    
+    async function dragAndDropToIndex(wrapper, sourceElement, targetIndex, currentItems) {
+      // 简化版 Touch 拖拽：sourceElement 拖拽到 targetIndex 位置
+      // 实际需要根据平台具体实现调整
+      try {
+        var rect = sourceElement.getBoundingClientRect();
+        var startX = rect.left + rect.width / 2;
+        var startY = rect.top + rect.height / 2;
+        
+        // 计算目标位置
+        var targetElement = currentItems[targetIndex];
+        if (!targetElement) return false;
+        var targetRect = targetElement.getBoundingClientRect();
+        var endX = targetRect.left + targetRect.width / 2;
+        var endY = targetRect.top + targetRect.height / 2;
+        
+        // 创建 Touch 事件序列
+        var touchId = 1;
+        var touchOpts = { bubbles: true, cancelable: true, view: window, clientX: startX, clientY: startY };
+        var touch = new Touch({ identifier: touchId, target: sourceElement, clientX: startX, clientY: startY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 });
+        
+        // touchstart
+        sourceElement.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, view: window, touches: [touch], targetTouches: [touch], changedTouches: [touch] }));
+        await new Promise(r => setTimeout(r, 50));
+        
+        // touchmove (中间点)
+        var midX = (startX + endX) / 2;
+        var midY = (startY + endY) / 2;
+        touch = new Touch({ identifier: touchId, target: sourceElement, clientX: midX, clientY: midY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 });
+        sourceElement.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, cancelable: true, view: window, touches: [touch], targetTouches: [touch], changedTouches: [touch] }));
+        await new Promise(r => setTimeout(r, 50));
+        
+        // touchmove (终点)
+        touch = new Touch({ identifier: touchId, target: sourceElement, clientX: endX, clientY: endY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 });
+        sourceElement.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, cancelable: true, view: window, touches: [touch], targetTouches: [touch], changedTouches: [touch] }));
+        await new Promise(r => setTimeout(r, 50));
+        
+        // touchend
+        touch = new Touch({ identifier: touchId, target: sourceElement, clientX: endX, clientY: endY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 });
+        sourceElement.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, view: window, touches: [], targetTouches: [], changedTouches: [touch] }));
+        await new Promise(r => setTimeout(r, 100));
+        
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
     async function callFillQuestionAnswer(question, answer, context) {
       context = context || {};
       if (!question || !isRecord(question)) {
@@ -1832,6 +1978,9 @@
 
       if (qtype === 0 || qtype === 1 || qtype === 3) {
         return callFillChoiceAnswer(question, answer, qtype, context, helpers);
+      }
+      if (qtype === 5) {
+        return callFillSortableAnswer(question, answer, context, helpers);
       }
       return callFillTextAnswer(question, answer, qtype, context, helpers);
     }
