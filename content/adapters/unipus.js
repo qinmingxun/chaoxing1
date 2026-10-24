@@ -135,7 +135,11 @@ const DOM_OPTION_SELECTOR_CANDIDATES = Object.freeze([
 const SORTABLE_CONTAINER_SELECTOR =
   '.sortable-list-wrapper, .sequence-container, .sequence-pc-card, [class*="sortable"], [class*="sequence"]';
 const SORTABLE_ITEM_SELECTOR =
-  'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item';
+  // 2026-10-24 实测（7-2 Sharing / Practice-3 / u7g533 配对题）：真实可操作项既不是 <li>
+  // 也没有 draggable 属性，而是 #sortableListWrapper 下交替排列的
+  // div.component-htmlview（6 个人物图片块 + 6 个句子块 A–F）。补进选择器，
+  // 否则 items 恒为 0、callFillSortableAnswer 永远 early-return。
+  'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item, .component-htmlview, #sortableListWrapper > div';
 
 // ---- 题型：题干前缀提取与映射（与 quiz-solver 的 qtype 0–4 一致）----
 const UNIPUS_QUIZ_TYPE_RE =
