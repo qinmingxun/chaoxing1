@@ -1904,46 +1904,60 @@
     }
     
     async function dragAndDropToIndex(wrapper, sourceElement, targetIndex, currentItems) {
-      // 简化版 Touch 拖拽：sourceElement 拖拽到 targetIndex 位置
-      // 实际需要根据平台具体实现调整
+      // Touch 拖拽序列（2026-10-24 改进）：
+      // 旧版只在 sourceElement 上派发事件，但拖拽库常把监听挂在 wrapper 或 document 上
+      // （如 u校园的 sequence 题），导致拖拽"发了但没反应"。现同时向
+      // sourceElement / wrapper / document 三层派发，兼容不同实现。
       try {
         var rect = sourceElement.getBoundingClientRect();
         var startX = rect.left + rect.width / 2;
         var startY = rect.top + rect.height / 2;
-        
-        // 计算目标位置
+
         var targetElement = currentItems[targetIndex];
-        if (!targetElement) return false;
+        if (!targetElement || targetElement === sourceElement) return false;
         var targetRect = targetElement.getBoundingClientRect();
         var endX = targetRect.left + targetRect.width / 2;
         var endY = targetRect.top + targetRect.height / 2;
-        
-        // 创建 Touch 事件序列
-        var touchId = 1;
-        var touchOpts = { bubbles: true, cancelable: true, view: window, clientX: startX, clientY: startY };
-        var touch = new Touch({ identifier: touchId, target: sourceElement, clientX: startX, clientY: startY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 });
-        
-        // touchstart
-        sourceElement.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, view: window, touches: [touch], targetTouches: [touch], changedTouches: [touch] }));
-        await new Promise(r => setTimeout(r, 50));
-        
-        // touchmove (中间点)
-        var midX = (startX + endX) / 2;
-        var midY = (startY + endY) / 2;
-        touch = new Touch({ identifier: touchId, target: sourceElement, clientX: midX, clientY: midY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 });
-        sourceElement.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, cancelable: true, view: window, touches: [touch], targetTouches: [touch], changedTouches: [touch] }));
-        await new Promise(r => setTimeout(r, 50));
-        
-        // touchmove (终点)
-        touch = new Touch({ identifier: touchId, target: sourceElement, clientX: endX, clientY: endY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 });
-        sourceElement.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, cancelable: true, view: window, touches: [touch], targetTouches: [touch], changedTouches: [touch] }));
-        await new Promise(r => setTimeout(r, 50));
-        
-        // touchend
-        touch = new Touch({ identifier: touchId, target: sourceElement, clientX: endX, clientY: endY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 });
-        sourceElement.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, view: window, touches: [], targetTouches: [], changedTouches: [touch] }));
-        await new Promise(r => setTimeout(r, 100));
-        
+
+        var doc = sourceElement.ownerDocument || document;
+        var targets = [sourceElement];
+        if (wrapper && wrapper !== sourceElement) targets.push(wrapper);
+        // document 层兜底（部分库在 document 上监听 pointer/touch 移动）
+        if (doc && doc.documentElement) targets.push(doc.documentElement);
+
+        var touchId = Date.now() % 100000;
+        var makeTouch = function (x, y) {
+          return new Touch({
+            identifier: touchId, target: sourceElement,
+            clientX: x, clientY: y,
+            screenX: x, screenY: y,
+            pageX: x, pageY: y,
+            radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1
+          });
+        };
+        var fire = function (type, x, y, isEnd) {
+          var t = makeTouch(x, y);
+          var opts = {
+            bubbles: true, cancelable: true, composed: true, view: window,
+            touches: isEnd ? [] : [t],
+            targetTouches: isEnd ? [] : [t],
+            changedTouches: [t]
+          };
+          for (var k = 0; k < targets.length; k++) {
+            try { targets[k].dispatchEvent(new TouchEvent(type, opts)); } catch (_e) { /* 单层失败继续 */ }
+          }
+        };
+
+        fire('touchstart', startX, startY, false);
+        await new Promise(function (r) { setTimeout(r, 60); });
+        // 中间点分段移动（多数拖拽库按移动步长计算落点）
+        var steps = 4;
+        for (var s = 1; s <= steps; s++) {
+          fire('touchmove', startX + (endX - startX) * s / steps, startY + (endY - startY) * s / steps, false);
+          await new Promise(function (r) { setTimeout(r, 45); });
+        }
+        fire('touchend', endX, endY, true);
+        await new Promise(function (r) { setTimeout(r, 120); });
         return true;
       } catch (e) {
         return false;

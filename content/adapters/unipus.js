@@ -131,6 +131,12 @@ const DOM_OPTION_SELECTOR_CANDIDATES = Object.freeze([
   ".answer-item",
 ]);
 
+// ---- 排序/拖拽题（qtype=5）选择器（2026-10-24 统一为常量，DOM 降级路径与加密题路径共用）----
+const SORTABLE_CONTAINER_SELECTOR =
+  '.sortable-list-wrapper, .sequence-container, .sequence-pc-card, [class*="sortable"], [class*="sequence"]';
+const SORTABLE_ITEM_SELECTOR =
+  'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item';
+
 // ---- 题型：题干前缀提取与映射（与 quiz-solver 的 qtype 0–4 一致）----
 const UNIPUS_QUIZ_TYPE_RE =
   /(?:【|\[|（|\()\s*(单项选择题?|多项选择题?|单选题?|多选题?|填空题?|判断题?|简答题?|问答题?|排序题?|拖拽题?|拖拽排序题?)\s*(?:】|\]|）|\))/;
@@ -2039,6 +2045,33 @@ async function runAutoAnswer(ctx) {
       }
     }
   } catch (_voiceRetagError) { /* 识别失败按原逻辑走 */ }
+
+  // 2026-10-24：排序题（qtype=5）的 sortableWrapper/sortableItems 原先只在 DOM 降级路径
+  // （buildDomQuestion）提供；加密题包路径解析出的题目没有这两个字段 →
+  // quiz-solver 的 callFillSortableAnswer 直接返回 no-sortable-elements，排序题永远答不了。
+  // 这里统一从页面 DOM 补挂容器与可拖拽元素（两类路径都覆盖）。
+  try {
+    const hasSortableQuestion = questions.some((q) => q && q.qtype === 5);
+    if (hasSortableQuestion) {
+      const docForSortable = getContextDocument(context);
+      const wrapper = docForSortable ? safeQuery(docForSortable, SORTABLE_CONTAINER_SELECTOR) : null;
+      if (wrapper) {
+        const sortableItems = safeQueryAll(wrapper, SORTABLE_ITEM_SELECTOR);
+        let attached = 0;
+        questions.forEach((question) => {
+          if (!question || question.qtype !== 5) return;
+          question.sortableWrapper = wrapper;
+          question.sortableItems = sortableItems;
+          attached += 1;
+        });
+        unipusLog(context,
+          `u校园排序题：已挂载排序容器（可拖拽元素 ${sortableItems.length} 个）到 ${attached} 道 qtype=5 题。` +
+          (sortableItems.length < 2 ? '（元素不足 2 个，可能未渲染完成）' : ''));
+      } else {
+        unipusWarn(context, 'u校园排序题：页面未找到排序容器，qtype=5 题可能无法作答。');
+      }
+    }
+  } catch (_sortableAttachError) { /* 挂载失败不阻塞流程 */ }
 
   const solvableIndexes = [];
   const solvableQuestions = [];
