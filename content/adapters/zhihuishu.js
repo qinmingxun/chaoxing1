@@ -1,3 +1,5 @@
+/* [AUTO-CLASSIC] ESM→classic（2026-10-24）：Edge 155 内容脚本不支持 import() 加载 ESM。 */
+{
 /*
  * [SECTION:ADAPTER_ZHIHUISU]
  * 职责：智慧树（知到，*.zhihuishu.com）平台适配器（spec/50-zhihuishu）。
@@ -340,12 +342,12 @@ function readZhihuishuStoredSettings(keys) {
 
 // ==== SECTION: zhihuishu-route ====
 
-export function matches(url) {
+function matches(url) {
   const hostname = getHostname(url).toLowerCase();
   return hostname === ZHIHUISHU_DOMAIN || hostname.endsWith(`.${ZHIHUISHU_DOMAIN}`);
 }
 
-export async function init(ctx) {
+async function init(ctx) {
   if (activeContext) return; // 幂等：重复调用直接返回（参考 chaoxing 的 activeContext 模式）
 
   activeContext = ctx || {};
@@ -366,7 +368,7 @@ export async function init(ctx) {
   }
 }
 
-export function destroy() {
+function destroy() {
   // 按代清理：使所有挂起的 handleVideo 回调失效
   activeGeneration += 1;
 
@@ -439,7 +441,7 @@ function applyVideoSpeedToActiveStates(rate) {
 //   场景设计，智慧树无播放时长上报需求，复用只会带来冗余复杂度。
 // 健壮性与 chaoxing 的 video-play 分区对齐：play() 拒绝安全、ended 幂等、按代清理。
 
-export async function handleVideo(video, ctx) {
+async function handleVideo(video, ctx) {
   const context = ctx || activeContext;
   let playable = false;
   try {
@@ -707,7 +709,7 @@ function collectZhihuishuVideos(doc) {
 // 填答优先复用 quiz-solver 的 solveQuestions（缓存命中 → DeepSeek，失败跳过本题不阻塞队列）；
 // solver 不可用且有 answers 数组时按 spec/50 原生方式填答。
 
-export function extractQuestions(doc) {
+function extractQuestions(doc) {
   const target = doc || getContextDocument(activeContext);
   if (!target || typeof target.querySelectorAll !== "function") return [];
 
@@ -955,7 +957,7 @@ function clickZhihuishuSubmit(button, context) {
   return false;
 }
 
-export async function fillAnswers(questions, answers, ctx) {
+async function fillAnswers(questions, answers, ctx) {
   const context = ctx || activeContext;
   const list = Array.isArray(questions) ? questions : [];
   if (!list.length) {
@@ -1146,7 +1148,7 @@ function setNativeInputValue(element, value) {
 //   常见"继续学习"挂机弹窗（AGENT 08 已实现，本适配器只做接线）；
 // 全局 API 不可用时降级为简易 visibility/focus 监听并 console 警告"keep-alive 不可用"。
 
-export function handleKeepAlive(root) {
+function handleKeepAlive(root) {
   const target = root || getContextDocument(activeContext);
   const api = readKeepAliveApi();
   if (api) {
@@ -1212,3 +1214,6 @@ function stopKeepAlive() {
 }
 
 // ==== END SECTION: zhihuishu-keep-alive ====
+
+globalThis.CourseHelperAdapterZhihuishu = { matches, init, destroy, handleVideo, extractQuestions, fillAnswers, handleKeepAlive };
+}

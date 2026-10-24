@@ -1,3 +1,5 @@
+/* [AUTO-CLASSIC] ESM→classic（2026-10-24）：Edge 155 内容脚本不支持 import() 加载 ESM。 */
+{
 /*
  * [SECTION:ADAPTER_UNIPUS]
  * 职责：u校园 AI 版（unipus.cn / *.unipus.cn）平台适配器（spec/40-unipus）。
@@ -1361,7 +1363,6 @@ function buildDomQuestion(container) {
         unipusLog(activeContext, `u校园检测到排序题（qtype=5），容器: ${sortableWrapper.className || sortableWrapper.tagName}，选项 ${sortableItems.length} 个`);
       }
     }
-    if (qtype === null) {
     // 前缀未命中：按 DOM 结构推断（需在真实页面核对）
     if (choiceInputs.length) {
       qtype = choiceInputs.some((input) => asString(input.type).toLowerCase() === "checkbox") ? 1 : 0;
@@ -1408,7 +1409,7 @@ function buildDomQuestion(container) {
 }
 
 // ---- 题目来源抽象入口（spec/40：getQuestions() 接口，后续补上解密即可无缝切换）----
-export async function getQuestions() {
+async function getQuestions() {
   // 首选：拦截缓存（按题目顺序）
   if (interceptedQuestions.length) {
     const questions = [];
@@ -1489,7 +1490,7 @@ export async function getQuestions() {
 // 缓存 unsafeWindow.__interceptedQuestionData、事件输出）已在
 // content/main-world-bridge.js 实现（AGENT 07），本函数不重复实现。
 
-export function installQuestionInterceptor() {
+function installQuestionInterceptor() {
   ensureMainWorldBridge();
   installQuestionMessageListener();
 }
@@ -1585,7 +1586,7 @@ function onQuestionMessage(event) {
 // MAIN bridge 会写入 unsafeWindow.__UCAMPUS_ANSWER_CACHE__（AGENT 07 已实现），
 // 供提交拦截时按题目顺序先序 shift 填充（位置填充，不需要题号映射）。
 
-export function setAnswerQueue(answers) {
+function setAnswerQueue(answers) {
   if (!Array.isArray(answers) || answers.some((answer) => typeof answer !== "string")) {
     unipusWarn(activeContext, "setAnswerQueue：answers 必须是字符串数组，本次不发送事件。");
     return;
@@ -1614,7 +1615,7 @@ export function setAnswerQueue(answers) {
 // installSubmitInterceptor 除启用接线外，还幂等注册 submit 事件监听
 // （destroy 经 disableSubmitInterceptor 移除）。
 
-export function installSubmitInterceptor() {
+function installSubmitInterceptor() {
   if (submitInterceptorEnabled) return; // 幂等
   const sent = postMainMessage(activeContext, MAIN_CONFIRM_EVENT, { enabled: true });
   if (!sent) {
@@ -1896,7 +1897,7 @@ function resolveQuizSolver(context) {
 // ---- 完整答题流程接线（u校园：由用户提交触发拦截注入，不自动提交）----
 // getQuestions() → solveQuestions → 按题目顺序提取答案 → setAnswerQueue →
 // installSubmitInterceptor。返回 {started, reason?, answerCount?} 供调用方（主控接线）检查。
-export async function runAutoAnswer(ctx) {
+async function runAutoAnswer(ctx) {
   const context = ctx || activeContext;
   if (!context) {
     unipusWarn(activeContext, "runAutoAnswer：缺少 AdapterContext，跳过。");
@@ -3735,7 +3736,7 @@ function stopUnipusIdleWatcher() {
 // 全局 API 不可用时降级为简易 visibility/focus 监听（重新可见时发一次轻量事件）
 // 并 console 警告"keep-alive 不可用"。
 
-export function startKeepAlive(doc) {
+function startKeepAlive(doc) {
   const api = readKeepAliveApi();
   if (api) {
     try {
@@ -4482,12 +4483,12 @@ function buildUnipusUi() {
 
 // ==== SECTION: unipus-lifecycle ====
 
-export function matches(url) {
+function matches(url) {
   const hostname = getHostname(url).toLowerCase();
   return hostname === UNIPUS_DOMAIN || hostname.endsWith(`.${UNIPUS_DOMAIN}`);
 }
 
-export async function init(ctx) {
+async function init(ctx) {
   if (activeContext) return; // 幂等：重复调用直接返回（参考 chaoxing 的 activeContext 模式）
 
   activeContext = ctx || {};
@@ -4528,7 +4529,7 @@ export async function init(ctx) {
   // 需在 MAIN world 获取 getUserMedia 权限并在此接线（待主控规划）。
 }
 
-export function destroy() {
+function destroy() {
   if (!activeContext) return; // 幂等
   const context = activeContext;
   activeGeneration += 1;
@@ -4580,3 +4581,6 @@ export function destroy() {
 }
 
 // ==== END SECTION: unipus-lifecycle ====
+
+globalThis.CourseHelperAdapterUnipus = { getQuestions, installQuestionInterceptor, setAnswerQueue, installSubmitInterceptor, runAutoAnswer, startKeepAlive, matches, init, destroy };
+}

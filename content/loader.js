@@ -193,60 +193,76 @@
 
   // 模块缓存破坏（2026-10-20 关键修复）：chrome-extension:// 的 ESM import 会被浏览器
   // 缓存，扩展"重新加载"后 content script 仍可能拿到旧模块（实测：loader.js 更新生效、
-  // unipus.js 仍是旧版，语音题探测日志完全不出现）。给模块 URL 加版本参数，
+  // unipus.js 仍是旧版，语音题探测日志完全不出现）。给模块 URL 加版本标记，
   // 版本变化即强制重新拉取。改 unipus.js/bridge/quiz-solver 等模块后递增。
-  const MODULE_CACHE_VERSION = '20261022.66';
+  //
+  // 【2026-10-24 真机修复】标记从 `?v=`（查询参数）改为 `#v=`（hash 片段）：
+  // Edge 155 下带查询参数的扩展资源 URL 不再按 ES module 解析，
+  // 会抛 "SyntaxError: Unexpected token 'export'"（adapter 加载失败的根因：
+  // 面板不出现、自动化全部失效）。hash 片段同样改变模块 URL（缓存 key 不同 → 缓存被破坏），
+  // 但不参与 web_accessible_resources 匹配、不影响 ESM 解析。
+  const MODULE_CACHE_VERSION = '20261024.67';
   function getModuleSpecifier(relativePath) {
     const runtime = getRuntime();
     const base = (runtime && typeof runtime.getURL === 'function')
       ? runtime.getURL(relativePath)
       : relativePath;
     try {
-      return base + (base.indexOf('?') === -1 ? '?' : '&') + 'v=' + MODULE_CACHE_VERSION;
+      const bare = base.split('#')[0];
+      return bare + '#v=' + MODULE_CACHE_VERSION;
     } catch (_error) {
       return base;
     }
   }
 
-  async function loadAdapter(entry) {
-    if (!entry || !entry.module) {
-      return null;
-    }
+  // 【2026-10-24 架构变更】adapter 不再用动态 import() 加载：
+  // Edge 155 的内容脚本已不支持 import() 取 ESM（会按 classic script 解析 →
+  // "SyntaxError: Unexpected token 'export'"），导致 adapter 全部加载失败、面板消失。
+  // 现改为 manifest content_scripts 按序注入 classic script，adapter 自行挂到 globalThis。
+  const ADAPTER_GLOBALS = Object.freeze({
+    chaoxing: 'CourseHelperAdapterChaoxing',
+    zhihuishu: 'CourseHelperAdapterZhihuishu',
+    unipus: 'CourseHelperAdapterUnipus'
+  });
 
-    try {
-      const loadedModule = await import(getModuleSpecifier(entry.module));
-      const candidate = loadedModule && loadedModule.default &&
-        typeof loadedModule.default === 'object'
-        ? loadedModule.default
-        : loadedModule;
-      if (!candidate || typeof candidate !== 'object') {
-        warnOnce(`adapter-shape:${entry.name}`, `${entry.name} adapter 导出为空，安全跳过。`);
-        return null;
-      }
-      return candidate;
-    } catch (error) {
-      // Adapters may be added after the loader; a missing module must not break
-      // the host page or prevent other content scripts from running.
-      warnOnce(`adapter-missing:${entry.name}`, `${entry.name} adapter 尚不存在或加载失败，安全跳过。`, error);
+  async function loadAdapter(entry) {
+    if (!entry || !entry.name) {
       return null;
     }
+    const globalKey = ADAPTER_GLOBALS[entry.name];
+    let candidate = null;
+    try {
+      candidate = globalKey && root ? root[globalKey] : null;
+    } catch (_readError) {
+      candidate = null;
+    }
+    if (!candidate || typeof candidate !== 'object') {
+      warnOnce(`adapter-missing:${entry.name}`,
+        `${entry.name} adapter 未注入（检查 manifest content_scripts 是否包含该文件），安全跳过。`);
+      return null;
+    }
+    return candidate;
   }
 
-  // 共享模块按序加载：md5.js 先把 globalThis.md5 挂上，quiz-solver.js 再执行
-  // 并挂 globalThis.CourseHelperQuizSolver；keep-alive.js 挂 __COURSE_HELPER_KEEP_ALIVE__
-  // （保活系统：u校园 + 通用挂机弹窗处理，三平台统一生效）。
+  // 共享模块由 manifest 按序注入（classic script）：md5.js 挂 globalThis.md5、
+  // quiz-solver.js 挂 globalThis.CourseHelperQuizSolver、keep-alive.js 挂
+  // __COURSE_HELPER_KEEP_ALIVE__。此处只校验是否就绪，缺失时降级跳过对应分区。
   async function loadSharedModules() {
-    const sharedModules = [
-      { module: 'lib/md5.js', name: 'md5' },
-      { module: 'content/quiz-solver.js', name: 'quiz-solver' },
-      { module: 'content/keep-alive.js', name: 'keep-alive' }
+    const checks = [
+      { global: 'CourseHelperQuizSolver', name: 'quiz-solver' },
+      { global: '__COURSE_HELPER_KEEP_ALIVE__', name: 'keep-alive' },
+      { global: 'md5', name: 'md5' }
     ];
-    for (const entry of sharedModules) {
+    for (const check of checks) {
+      let ready = false;
       try {
-        await import(getModuleSpecifier(entry.module));
-      } catch (error) {
-        warnOnce(`shared-module-missing:${entry.name}`,
-          `${entry.name} 共享模块加载失败，相关分区将降级跳过。`, error);
+        ready = Boolean(root && root[check.global]);
+      } catch (_checkError) {
+        ready = false;
+      }
+      if (!ready) {
+        warnOnce(`shared-module-missing:${check.name}`,
+          `${check.name} 共享模块未就绪（manifest 注入顺序？），相关分区将降级跳过。`);
       }
     }
   }
@@ -493,7 +509,7 @@
     // 避免"改了代码但浏览器跑的是旧版"的排查浪费。修改 unipus.js/bridge 后递增。
     // 同时写入 DOM 属性：控制台执行 document.documentElement.dataset.courseHelperVersion
     // 即可秒查当前运行版本（页面可见/可查，不依赖日志滚动）。
-    const ADAPTER_VERSION = 'v2026-10-20.66（页脚按钮3次后走目录）';
+    const ADAPTER_VERSION = 'v2026-10-20.67（模块加载修复）';
     try {
       console.log('[course-helper] [course-helper] 扩展已加载：' + adapterEntry.name +
         ' 适配器 ' + ADAPTER_VERSION);

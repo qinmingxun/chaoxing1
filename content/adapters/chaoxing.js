@@ -1,3 +1,5 @@
+/* [AUTO-CLASSIC] ESM→classic（2026-10-24）：Edge 155 内容脚本不支持 import() 加载 ESM。 */
+{
 /*
  * [SECTION:ADAPTER_CHAOXING]
  * 职责：学习通（Chaoxing）页面适配器的路由、任务解析与跨层请求骨架。
@@ -132,14 +134,14 @@ function postMainMessage(ctx, type, payload) {
 // ==== END SECTION: chaoxing-selectors ====
 
 // ==== SECTION: chaoxing-route ====
-export function matches(url) {
+function matches(url) {
   const path = normalizePathname(getPathname(url));
   // 手机版测验在任务列表页 /work/phone/doHomeWork 内 iframe 导航到 /work/phone/work 后处理，
   // 一并放行 /work/phone 前缀（spec/30e）。
   return ROUTE_PATHS.includes(path) || path.indexOf("/work/phone") === 0;
 }
 
-export async function init(ctx) {
+async function init(ctx) {
   if (activeContext) return;
 
   activeContext = ctx || {};
@@ -241,7 +243,7 @@ export async function init(ctx) {
   }
 }
 
-export function destroy() {
+function destroy() {
   const context = activeContext;
   activeGeneration += 1;
   removeChapterGuard();
@@ -323,7 +325,7 @@ function attachDomMetadata(task, container, index) {
   return task;
 }
 
-export function parseTasks(doc) {
+function parseTasks(doc) {
   const parsed = extractMArgValue(doc);
   const { attachments, defaults } = readAttachmentsAndDefaults(parsed);
   const containers = safeQueryAll(doc, SELECTORS.attachmentContainers);
@@ -426,7 +428,7 @@ async function sendJob(kind, input, ctx) {
   }
 }
 
-export async function completeJob(kind, input) {
+async function completeJob(kind, input) {
   const result = await sendJob(kind, input || {}, activeContext);
   if (result.ok) return result.data || {};
   return { isPassed: false, error: result.error };
@@ -438,7 +440,7 @@ function getTaskDocument(task, ctx) {
   return getContextDocument(ctx);
 }
 
-export async function processTask(task, defaults, ctx) {
+async function processTask(task, defaults, ctx) {
   if (!task || typeof task !== "object") {
     return { done: true, skipped: true, reason: "invalid-task" };
   }
@@ -843,7 +845,7 @@ async function getVideoStatusWithContext(_input, context) {
   return sendVideoReportRequest("CX_STATUS", payload, context);
 }
 
-export async function getVideoStatus(_input) {
+async function getVideoStatus(_input) {
   return getVideoStatusWithContext(_input, activeContext);
 }
 
@@ -903,7 +905,7 @@ async function reportVideoWithContext(_input, context) {
   return sendVideoReportRequest("CX_REPORT", payload, context);
 }
 
-export async function reportVideo(_input) {
+async function reportVideo(_input) {
   return reportVideoWithContext(_input, activeContext);
 }
 
@@ -924,7 +926,7 @@ function readVideoReportSettings(context) {
 
 // 视频模拟上报主流程；由任务队列对 video 任务点调用（TaskResult 形状），
 // isPassed===true 后返回 { done: true } 继续下一个任务点。
-export async function runVideoReportTask(task, defaults, ctx) {
+async function runVideoReportTask(task, defaults, ctx) {
   const context = ctx || activeContext;
   const startGeneration = activeGeneration;
   const settings = readVideoReportSettings(context);
@@ -1318,7 +1320,7 @@ function attachPlayListener(target, eventName, handler, cleanups) {
   }
 }
 
-export async function runVideoPlayTask(task, _defaults, ctx) {
+async function runVideoPlayTask(task, _defaults, ctx) {
   const context = ctx || activeContext;
   const startGeneration = activeGeneration;
   const kind = taskModule(task) === "audio" ? "audio" : "video";
@@ -1813,7 +1815,7 @@ function savePcQuiz(doc) {
   }
 }
 
-export async function solvePcQuiz(doc, ctx) {
+async function solvePcQuiz(doc, ctx) {
   const targetDoc = doc || getContextDocument(ctx || activeContext);
   const context = ctx || activeContext;
   if (!targetDoc || typeof targetDoc.querySelectorAll !== "function") {
@@ -2349,7 +2351,7 @@ async function solvePhoneQuizScene(doc, context) {
   return { done: false, skipped: false, reason: "no-question-solved" };
 }
 
-export async function solvePhoneWorkExam(doc, ctx) {
+async function solvePhoneWorkExam(doc, ctx) {
   const targetDoc = doc || getContextDocument(ctx || activeContext);
   const context = ctx || activeContext;
   if (!targetDoc || typeof targetDoc.querySelectorAll !== "function") {
@@ -3188,7 +3190,7 @@ function markFontEncrypted(el) {
   }
 }
 
-export async function decryptFont(doc) {
+async function decryptFont(doc) {
   try {
     if (!doc || typeof doc.querySelectorAll !== "function") return;
     if (DECRYPTED_FONT_DOCS.has(doc)) return; // 同一文档不重复解密。
@@ -3252,7 +3254,7 @@ export async function decryptFont(doc) {
 // 主控接线辅助（CONTRACTS §6 未列出）：workid 分支在提取题目/答题前调用，
 // 存在带 font-cxsecret class 或 data-course-helper-encrypted 标记的元素即视为
 // 字体未解密（可能资源缺失降级），此时应跳过整个测验并警告。
-export function hasUndecryptedFont(doc) {
+function hasUndecryptedFont(doc) {
   if (!doc || typeof doc.querySelectorAll !== "function") return false;
   return safeQueryAll(doc, FONT_CXSECRET_SELECTOR).length > 0 ||
     safeQueryAll(doc, `[${FONT_ENCRYPTED_ATTR}]`).length > 0;
@@ -3321,3 +3323,6 @@ function triggerNextChapter(doc) {
 }
 
 // ==== END SECTION: chapter-next ====
+
+globalThis.CourseHelperAdapterChaoxing = { matches, init, destroy, parseTasks, completeJob, processTask, getVideoStatus, reportVideo, runVideoReportTask, runVideoPlayTask, solvePcQuiz, solvePhoneWorkExam, decryptFont, hasUndecryptedFont };
+}

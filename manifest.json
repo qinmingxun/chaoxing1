@@ -11,7 +11,17 @@
         "*://localhost/*",
         "*://127.0.0.1/*"
       ],
-      "js": ["lib/typr.js", "content/loader.js"],
+      "js": [
+        "lib/typr.js",
+        "lib/md5.js",
+        "content/quiz-solver.js",
+        "content/keep-alive.js",
+        "content/video-manager.js",
+        "content/adapters/chaoxing.js",
+        "content/adapters/zhihuishu.js",
+        "content/adapters/unipus.js",
+        "content/loader.js"
+      ],
       "all_frames": true
     },
     {
