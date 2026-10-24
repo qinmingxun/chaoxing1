@@ -578,6 +578,12 @@ const UNIPUS_QTYPE_BY_REPLY = Object.freeze({
   "text-area-blank": 2,
   judge: 3,
   judgement: 3,
+  // 2026-10-24 实测（7-7 Presenting 排序题）：平台 replyType="sequence"，
+  // 父节点 options 为 6 个待排序句、children 为 6 个排序位。
+  sequence: 5,
+  "sequence-blank": 5,
+  sortable: 5,
+  "drag-drop": 5,
 });
 
 // WebCrypto 不支持 AES-ECB（AES-CBC 强制 PKCS7 去填充校验，无法处理 ZeroPadding 块），
@@ -979,7 +985,7 @@ function parseUnipusQuestionJson(plainText) {
     }
     return parts.join(" ");
   };
-  const collect = (node, ancestorText) => {
+  const collect = (node, ancestorText, ancestorReplyType, ancestorOptions) => {
     if (!node || typeof node !== "object") return;
     const ownText = stripQuestionNumber(
       stripTagsHtml(asString(node.quesText)).replace(/\s+/g, " ").trim(),
@@ -993,16 +999,32 @@ function parseUnipusQuestionJson(plainText) {
         direction && direction.mText)),
     ).replace(/\s+/g, " ").trim();
     if (dirText) stem = stem ? `${stem} ${dirText}` : dirText;
+    // 2026-10-24：排序题（replyType=sequence）等题型的 quesText 是纯 HTML 结构
+    // （如 <div class="html_image_list">…</div> 图片列表），stripTags 后为空 →
+    // 旧逻辑据此丢弃整题（"解密失败/无题目"）。此处保留 HTML 压缩形态作为题干。
+    const rawQuesHtml = asString(node.quesText).replace(/\s+/g, " ").trim();
     if (ownText) {
       stem = stem ? `${stem} ${ownText}` : ownText;
     } else if (ownContents) {
       // 填空题等题型的题目文本可能在 contents[].text。
       stem = stem ? `${stem} ${ownContents}` : ownContents;
+    } else if (rawQuesHtml) {
+      stem = stem ? `${stem} ${rawQuesHtml}` : rawQuesHtml;
     }
     const children = Array.isArray(node.children) ? node.children : [];
-    if ((ownText || ownContents) && !children.length) {
+    // 有自身选项（排序题的 6 个待排序句在父节点；子题也可能各自带选项）同样算"有内容"。
+    const hasOwnOptions = Array.isArray(node.options) && node.options.length > 0;
+    if ((ownText || ownContents || hasOwnOptions) && !children.length) {
       // 叶子题：题干非空且无子题。
-      const replyType = asString(node.replyType).toLowerCase();
+      // 2026-10-24 修复：replyType 常只出现在【父】节点（如 outer content 的
+      // "oral-personal-state"），叶子题自身没有 → 旧代码一律落回 4（口语），
+      // 导致大量题目被误判为语音题、答案注入等待不存在的输入框。
+      // 现改为「自身优先，取不到则继承最近的祖先 replyType」。
+      const replyType = asString(
+        node.replyType !== undefined && node.replyType !== null && node.replyType !== ""
+          ? node.replyType
+          : ancestorReplyType,
+      ).toLowerCase();
       const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
         ? UNIPUS_QTYPE_BY_REPLY[replyType]
         : 4;
@@ -1010,7 +1032,13 @@ function parseUnipusQuestionJson(plainText) {
       if (!isVoice && UNIPUS_QTYPE_BY_REPLY[replyType] === undefined) {
         logUnknownReplyTypeOnce(replyType);
       }
-      const options = (Array.isArray(node.options) ? node.options : [])
+      // 2026-10-24：排序题（replyType=sequence）的 options 在【父】节点，
+      // 叶子题自身没有 → 自身优先，取不到则继承最近的祖先 options。
+      const ownOptions = Array.isArray(node.options) ? node.options : [];
+      const optionsSource = ownOptions.length
+        ? ownOptions
+        : (Array.isArray(ancestorOptions) ? ancestorOptions : []);
+      const options = optionsSource
         .map((option) => {
           if (typeof option === "string") return stripTagsHtml(option);
           if (option && typeof option === "object") {
@@ -1032,10 +1060,28 @@ function parseUnipusQuestionJson(plainText) {
       return;
     }
     const countBefore = questions.length;
-    for (const child of children) collect(child, stem);
-    if ((ownText || ownContents) && questions.length === countBefore) {
+    const inheritedReplyType = node.replyType !== undefined && node.replyType !== null && node.replyType !== ""
+      ? asString(node.replyType)
+      : ancestorReplyType;
+    const inheritedOptions = Array.isArray(node.options) && node.options.length
+      ? node.options
+      : ancestorOptions;
+    for (const child of children) collect(child, stem, inheritedReplyType, inheritedOptions);
+    if ((ownText || ownContents || rawQuesHtml || hasOwnOptions) && questions.length === countBefore) {
       // children 为无文本空壳（如填空题的空位占位节点）：节点自身即题目。
-      const replyType = asString(node.replyType).toLowerCase();
+      // 2026-10-24：排序题（replyType=sequence）的子题 quesText 是纯 HTML 图片列表
+      // （<div class="html_image_list">…</div>），stripTags 后为空 → 旧条件丢弃全部子题，
+      // 导致整页解析 0 道题（表现为"解密失败/未获取到题目"）。此处放宽为
+      // 「有文本 / 有 contents / 有 HTML 题干 / 有选项」即视为题目。
+      // 2026-10-24 修复：replyType 常只出现在【父】节点（如 outer content 的
+      // "oral-personal-state"），叶子题自身没有 → 旧代码一律落回 4（口语），
+      // 导致大量题目被误判为语音题、答案注入等待不存在的输入框。
+      // 现改为「自身优先，取不到则继承最近的祖先 replyType」。
+      const replyType = asString(
+        node.replyType !== undefined && node.replyType !== null && node.replyType !== ""
+          ? node.replyType
+          : ancestorReplyType,
+      ).toLowerCase();
       const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
         ? UNIPUS_QTYPE_BY_REPLY[replyType]
         : 4;
@@ -1043,10 +1089,27 @@ function parseUnipusQuestionJson(plainText) {
       if (!isVoice && UNIPUS_QTYPE_BY_REPLY[replyType] === undefined) {
         logUnknownReplyTypeOnce(replyType);
       }
+      // 2026-10-24：排序题（replyType=sequence）的待排序选项在【父】节点，
+      // 子题自身无 options → 这里同样采用「自身优先，否则继承祖先」。
+      const ownOptsHere = Array.isArray(node.options) ? node.options : [];
+      const inheritedOptsHere = ownOptsHere.length
+        ? ownOptsHere
+        : (Array.isArray(ancestorOptions) ? ancestorOptions : []);
+      const optionsHere = inheritedOptsHere
+        .map((option) => {
+          if (typeof option === "string") return stripTagsHtml(option);
+          if (option && typeof option === "object") {
+            return stripTagsHtml(asString(pick(
+              option.optionText, option.text, option.content, option.label, option.value,
+            )));
+          }
+          return "";
+        })
+        .filter((option) => option);
       questions.push(withChoiceClick({
         qtype,
         stem,
-        options: [],
+        options: optionsHere,
         inputs: [],
         isAnswered: () => false,
         __isVoice: isVoice,
@@ -1074,7 +1137,7 @@ function parseUnipusQuestionJson(plainText) {
         }
       }
       const countBefore = questions.length;
-      collect(inner, "");
+      collect(inner, "", "", []);
       if (answerLeaves > 1 && questions.length === countBefore + 1) {
         questions[questions.length - 1].__answerLeafCount = answerLeaves;
       }
