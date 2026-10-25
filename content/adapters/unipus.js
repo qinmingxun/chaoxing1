@@ -4025,7 +4025,32 @@ function startUnipusIdleWatcher(context) {
           Date.now() - (idleWatchState.lastAdvanceAt || 0) < IDLE_ADVANCE_RETRY_MS) {
         return;
       }
-      // 情况 -1：先滚动到页面底部，触发题目区懒加载（听力/阅读长页常见）。
+      // 【2026-10-25 用户反馈"直接自动跳到下一节了，没有点到子标签"】两点修复：
+      // ① 子标签检查**提前到"滚动"之前** —— 视频/听力页的"翻页"就是切顶部子标签，
+      //    排在滚动之后会先消耗掉一轮空闲预算；且滚动会把 scrolledHash 置位，
+      //    之后若 triedTabs 再去重就彻底没机会点子标签，只能落到"情况 B 点目录下一节"，
+      //    用户看到的就是"直接跳节、没点子上面的子标签"。
+      // ② triedTabs 由"永久去重"改为**带冷却的可重试**（同一标签每 90s 允许再试一次），
+      //    避免首次点击因懒加载/资源未就绪未生效后永久失去子标签推进能力。
+      const pendingTab = findInactiveSubTab(doc);
+      if (pendingTab) {
+        const tabName = asString(pendingTab.textContent).replace(/\s+/g, "");
+        const tabKey = hash + "::" + tabName;
+        if (!idleWatchState.triedTabs) idleWatchState.triedTabs = new Set();
+        if (!idleWatchState.tabRetryAt) idleWatchState.tabRetryAt = Object.create(null);
+        const lastTabTryAt = idleWatchState.tabRetryAt[tabKey] || 0;
+        if (!idleWatchState.triedTabs.has(tabKey) || Date.now() - lastTabTryAt >= IDLE_ADVANCE_RETRY_MS) {
+          idleWatchState.triedTabs.add(tabKey);
+          idleWatchState.tabRetryAt[tabKey] = Date.now();
+          if (clickWithPointerSequence(context, pendingTab)) {
+            idleWatchState.lastActivityAt = Date.now();
+            unipusLog(context,
+              `u校园子标签推进：当前子标签无可答内容，切换到「${tabName.slice(0, 20)}」。`);
+            return;
+          }
+        }
+      }
+      // 情况 -1：滚动到页面底部，触发题目区懒加载（听力/阅读长页常见）。
       // 每页只滚一次，滚动后重置空闲计时给内容渲染留时间。
       if (idleWatchState.scrolledHash !== hash) {
         idleWatchState.scrolledHash = hash;
@@ -4038,23 +4063,6 @@ function startUnipusIdleWatcher(context) {
         } catch (_scrollError) { /* 滚动失败继续尝试推进 */ }
         idleWatchState.lastActivityAt = Date.now();
         return;
-      }
-      // 情况 0（2026-10-22 用户反馈 6-6）：同页存在未激活子标签 → 先切换子标签。
-      // 6-6 的结构是 4 个子标签，题目/填空在 Note them down，而当前停在 Get the skills
-      // （只有讲解视频，播完即无题可答）→ 旧逻辑会误以为整页无内容并跳节。
-      const pendingTab = findInactiveSubTab(doc);
-      if (pendingTab) {
-        const tabName = asString(pendingTab.textContent).replace(/\s+/g, "");
-        const tabKey = hash + "::" + tabName;
-        if (!idleWatchState.triedTabs) idleWatchState.triedTabs = new Set();
-        if (!idleWatchState.triedTabs.has(tabKey)) {
-          idleWatchState.triedTabs.add(tabKey);
-          if (clickWithPointerSequence(context, pendingTab)) {
-            unipusLog(context,
-              `u校园子标签推进：当前子标签无可答内容，切换到「${tabName.slice(0, 20)}」。`);
-            return;
-          }
-        }
       }
       // 情况 A：无题目但页脚有按钮（实测 6-4 Viewing 导语页：页脚有"提交"却无可答题目）
       // ——直接点它推进；否则会卡住（看门狗因"有可见按钮"不推进，自动提交又因"无题目"不触发）。
