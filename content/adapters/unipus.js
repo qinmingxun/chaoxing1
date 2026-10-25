@@ -2406,6 +2406,8 @@ const UNIPUS_DOM_SKIP_INPUT_TYPES = Object.freeze({
   submit: true,
   button: true,
   file: true,
+  // 2026-10-25：password/number 等非答题输入（含扩展面板的 api-key 框）一律不填
+  password: true,
 });
 
 function setUnipusInputValue(element, value) {
@@ -2475,6 +2477,12 @@ function fillAnswersToPage(doc, answers) {
     const candidateInputs = [];
     for (const container of containerNodes) {
       for (const input of safeQueryAll(container, "input, textarea")) {
+        // 2026-10-25 防御：绝不动扩展面板自身的输入框（api-key / bank-url / bank-key），
+        // 避免答案被写进配置框（用户反馈"页面没有答题按键，它却显示有答题按键"就是面板
+        // 输入框被当成页面答题控件的表现）。
+        try {
+          if (input.closest && input.closest("#ch-panel, #ch-ball, .ch-root")) continue;
+        } catch (_ownUiError) { /* closest 不可用则继续常规判定 */ }
         const tagName = asString(input && input.tagName).toLowerCase();
         const type = asString(input && input.type).toLowerCase();
         if (tagName === "input" && UNIPUS_DOM_SKIP_INPUT_TYPES[type]) continue;
@@ -3740,8 +3748,14 @@ function tryAdvanceAfterMediaEnd(context) {
   const doc = getContextDocument(context);
   if (!doc) return false;
   try {
-    const hasInputs = safeQueryAll(doc,
-      '.layout-reply-container input, .layout-reply-container textarea, input[type="text"], textarea').length > 0;
+    // 2026-10-25：必须排除扩展面板自身的输入框（api-key/bank-url/bank-key），
+    // 否则会误判"页面仍有待作答控件"，媒体播完后不肯推进。
+    const isOwnUi = (el) => {
+      try { return !!(el && el.closest && el.closest('#ch-panel, #ch-ball, .ch-root')); } catch (_e) { return false; }
+    };
+    const questionInputs = safeQueryAll(doc,
+      '.layout-reply-container input, .layout-reply-container textarea, input[type="text"], textarea').filter((el) => !isOwnUi(el));
+    const hasInputs = questionInputs.length > 0;
     const hasRecords = safeQueryAll(doc,
       '.ucomp-recorder .button-record, .record-icon.button-record').length > 0;
     if (hasInputs || hasRecords) {
@@ -3908,10 +3922,14 @@ function unipusHasInteractiveContent(doc) {
   }
   // 2) 输入类：排除页头/导航/搜索框（2026-10-21 实测：页面有 1 个搜索框，
   //    若一并计入会导致"永远有内容"，看门狗永不触发）。
-  const inputSelector = 'textarea, input[type="text"], input[type="radio"], input[type="checkbox"]';
+  // 2026-10-25【用户反馈"页面没有答题按键，它显示有答题按键"】：还必须排除**扩展面板自身**——
+  // 面板自带 3 个输入框（api-key / bank-url / bank-key），旧逻辑把它们当成"页面仍有待作答
+  // 控件" → 判定为有内容 → 媒体播完不推进、看门狗也不兜底，用户看到的就是页面卡住。
+  const inputSelector = 'textarea, input[type="text"], input[type="password"], input[type="radio"], input[type="checkbox"], select';
   for (const element of safeQueryAll(doc, inputSelector)) {
     try {
-      if (element.closest && element.closest('header, nav, [class*="search"], [class*="header"], [class*="navbar"]')) continue;
+      if (element.closest && element.closest(
+        '#ch-panel, #ch-ball, .ch-root, header, nav, [class*="search"], [class*="header"], [class*="navbar"]')) continue;
     } catch (_closestError) { /* closest 不可用时按内容处理 */ }
     return true;
   }
