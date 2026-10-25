@@ -3691,18 +3691,39 @@ function findNextTocItem(doc) {
 // （Note them down / Get the skills / Role-play it / More for role-playing），
 // 当前标签可能只有"听/看"内容（视频播完），题目在别的标签里。空闲时先尝试
 // 切换到未激活的子标签，避免整页判为"无题可答"直接跳节。
+// 2026-10-25【用户反馈"视频没有翻页按钮，视频页翻页需要点击上面来跳过视频"】：
+// u校园视频/听力页的"翻页"就是**顶部子标签**（Get a clue / View it / Think and speak），
+// 页面上根本没有"下一页"按钮（实测"含 跳过/下一/继续 的元素: 无"）。
+// 旧实现返回 tabs 里**第一个**未激活子标签 → 在 View it 看视频时会往回点 Get a clue
+// （方向错误），用户看到的就是"播完了不翻页/原地打转"。
+// 现改为**按 DOM 顺序向后取**：优先取当前激活标签之后的第一个未激活标签；
+// 若当前已是最后一个，则回绕到前面。
 function findInactiveSubTab(doc) {
   if (!doc) return null;
-  const tabs = safeQueryAll(doc, '.pc-header-tabs-container .ant-col.tab');
-  for (const tab of tabs) {
+  const tabs = safeQueryAll(doc, ".pc-header-tabs-container .ant-col.tab");
+  if (!tabs.length) return null;
+  const isActive = (tab) => {
     try {
-      const cls = asString(tab.className);
-      if (/pc-header-tab-activity|(^|[-_\s])active([-_\s]|$)/.test(cls)) continue;
-      if (!isElementVisible(tab)) continue;
-      const name = asString(tab.textContent).replace(/\s+/g, '');
-      if (!name) continue;
-      return tab;
-    } catch (_tabError) { /* 继续下一个 */ }
+      return /pc-header-tab-activity|(^|[-_\s])active([-_\s]|$)/.test(asString(tab.className));
+    } catch (_activeError) { return false; }
+  };
+  const usable = (tab) => {
+    try {
+      return isElementVisible(tab) && asString(tab.textContent).replace(/\s+/g, "").length > 0;
+    } catch (_usableError) { return false; }
+  };
+  const activeIndex = tabs.findIndex((tab) => isActive(tab));
+  const order = [];
+  if (activeIndex >= 0) {
+    for (let i = activeIndex + 1; i < tabs.length; i += 1) order.push(tabs[i]);
+    for (let i = 0; i < activeIndex; i += 1) order.push(tabs[i]);
+  } else {
+    tabs.forEach((tab) => order.push(tab));
+  }
+  for (const tab of order) {
+    if (isActive(tab)) continue;
+    if (!usable(tab)) continue;
+    return tab;
   }
   return null;
 }
