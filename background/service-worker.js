@@ -3,7 +3,7 @@
 const DEEPSEEK_URL_DEFAULT = 'https://api.deepseek.com/chat/completions';
 // 端点可经 storage.local.deepseekApiBase 覆盖（自建代理/测试 mock 用；默认官方直连不变）。
 // 值填 origin 或完整路径（如 https://api.deepseek.com 或 https://mock.local/v1/chat/completions）。
-const DEEPSEEK_SYSTEM_PROMPT = '你是答题助手，只输出答案，不要任何解释。单选题和判断题只输出选项字母（如 A）；多选题输出连续字母（如 ABD）；填空题多个空用 # 分隔；简答题直接输出答案文字。';
+const DEEPSEEK_SYSTEM_PROMPT = '你是答题助手，只输出答案，不要任何解释。单选题和判断题只输出选项字母（如 A）；多选题输出连续字母（如 ABD）；填空题多个空用 # 分隔；简答题直接输出答案文字；排序/配对题（qtype=5）按正确顺序输出选项字母并用 # 分隔（如 C#A#B#D#E#F），共 N 个选项就输出 N 个字母，无法确定时也要按最佳判断给全。';
 const DEEPSEEK_DEFAULT_MODEL = 'deepseek-chat';
 const DEEPSEEK_DEFAULT_TEMPERATURE = 0.1;
 const DEEPSEEK_DEFAULT_TIMEOUT_MS = 30000;
@@ -117,7 +117,7 @@ function assertDeepSeekPayload(payload) {
     throw new RequestError('INVALID_FIELD', 'domain is invalid', false);
   }
   const qtype = requireInteger(payload, 'qtype');
-  if (![0, 1, 2, 3, 4].includes(qtype)) {
+  if (![0, 1, 2, 3, 4, 5].includes(qtype)) {
     throw new RequestError('INVALID_FIELD', 'qtype is invalid', false);
   }
   const stem = requireString(payload, 'stem');
@@ -332,7 +332,7 @@ function assertQuestionBankPayload(payload) {
     throw new RequestError('INVALID_FIELD', 'domain is invalid', false);
   }
   const qtype = requireInteger(payload, 'qtype');
-  if (![0, 1, 2, 3, 4].includes(qtype)) {
+  if (![0, 1, 2, 3, 4, 5].includes(qtype)) {
     throw new RequestError('INVALID_FIELD', 'qtype is invalid', false);
   }
   const stem = requireString(payload, 'stem');
