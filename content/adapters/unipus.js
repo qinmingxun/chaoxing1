@@ -3731,6 +3731,74 @@ function findFootLinkByText(doc, pattern) {
   return null;
 }
 
+// 2026-10-25【用户反馈"视频播放完没有自动下一页"的直接原因】：此前只接管 play()/倍速，
+// **完全没有监听 ended** → 视频/音频播完后无人推进，只能等看门狗 65s 兜底，
+// 用户看到的就是"播完了却卡住不动"。
+// 处理：媒体 ended 后，若页面已无待作答控件（输入框/录音按钮），立即按
+// 子标签 → 页脚按钮 → 目录下一节 的顺序推进；若仍要答题，只重置空闲计时，不抢跑。
+function tryAdvanceAfterMediaEnd(context) {
+  const doc = getContextDocument(context);
+  if (!doc) return false;
+  try {
+    const hasInputs = safeQueryAll(doc,
+      '.layout-reply-container input, .layout-reply-container textarea, input[type="text"], textarea').length > 0;
+    const hasRecords = safeQueryAll(doc,
+      '.ucomp-recorder .button-record, .record-icon.button-record').length > 0;
+    if (hasInputs || hasRecords) {
+      if (idleWatchState) idleWatchState.lastActivityAt = Date.now();
+      unipusLog(context, "u校园媒体：播放结束，但页面仍有待作答控件，交由答题流程处理。");
+      return false;
+    }
+  } catch (_probeError) { /* 探测失败按可推进处理 */ }
+
+  const pendingTab = findInactiveSubTab(doc);
+  if (pendingTab && clickWithPointerSequence(context, pendingTab)) {
+    unipusLog(context,
+      `u校园媒体结束推进：切换到子标签「${asString(pendingTab.textContent).replace(/\s+/g, "").slice(0, 16)}」。`);
+    return true;
+  }
+  const foot = findFootLinkByText(doc, /继续学习|下一题|提交/);
+  if (foot && clickWithPointerSequence(context, foot)) {
+    unipusLog(context,
+      `u校园媒体结束推进：已点击「${asString(foot.textContent).replace(/\s+/g, "").slice(0, 12)}」翻页。`);
+    return true;
+  }
+  const nextToc = findNextTocItem(doc);
+  if (nextToc && clickWithPointerSequence(context, nextToc)) {
+    unipusLog(context, "u校园媒体结束推进：已点击左侧目录下一节。");
+    return true;
+  }
+  return false;
+}
+
+// 给单个媒体元素挂一次性 ended 钩子（幂等）。
+function installMediaEndedHook(context, media) {
+  if (!media || typeof media.addEventListener !== "function") return;
+  if (media.__chEndedHooked === true) return;
+  media.__chEndedHooked = true;
+  media.addEventListener("ended", () => {
+    try {
+      setTimeout(() => {
+        try {
+          const doc = getContextDocument(context);
+          if (!doc) return;
+          // 本页还有别的媒体在播 → 不推进
+          const playing = safeQueryAll(doc, "video, audio").filter(
+            (el) => el !== media && !el.ended && !el.paused && el.readyState >= 2);
+          if (playing.length) return;
+          // 有素材但还没播到结尾的 → 不推进
+          const unfinished = safeQueryAll(doc, "video, audio").filter(
+            (el) => !el.ended && Number(el.duration || 0) > 0 && el.currentTime < Number(el.duration) - 0.5);
+          if (unfinished.length) return;
+          if (idleWatchState) idleWatchState.lastActivityAt = 0; // 让看门狗立刻可判空闲
+          unipusLog(context, "u校园媒体：本页视频/音频已全部播放结束，立即触发推进。");
+          tryAdvanceAfterMediaEnd(context);
+        } catch (_endedInnerError) { /* 忽略 */ }
+      }, 900);
+    } catch (_endedError) { /* 忽略 */ }
+  });
+}
+
 function scheduleAutoContinue(context) {
   resetAutoContinueState();
   autoContinueState.startedAt = Date.now();
@@ -4145,6 +4213,7 @@ function applyUnipusVideoPolicy(context) {
         video.addEventListener("play", () => {
           try { video.playbackRate = readUnipusVideoRate(context); } catch (_playError) {}
         });
+        installMediaEndedHook(context, video);
         unipusLog(context, `u校园视频：已接管视频元素（目标倍速 ${rate}x，尝试静音自动播放）。`);
       }
       if (Math.abs(video.playbackRate - rate) > 0.01) {
@@ -4189,6 +4258,7 @@ function applyUnipusVideoPolicy(context) {
         audio.addEventListener("play", () => {
           try { audio.playbackRate = readUnipusVideoRate(context); } catch (_audioPlayError) {}
         });
+        installMediaEndedHook(context, audio);
         unipusLog(context, `u校园音频：已接管听力音频（目标倍速 ${rate}x，自动播放）。`);
       }
       if (Math.abs(audio.playbackRate - rate) > 0.01) {
