@@ -2754,6 +2754,33 @@ function clickWithPointerSequence(context, element) {
   return clickElementSafely(context, element);
 }
 
+// 2026-10-25【解决"子标签点不动"】：用 chrome.debugger 产生**真实可信**鼠标事件。
+// 背景：u校园顶部子标签是 antd Tabs，只响应 isTrusted=true 的事件；
+// 内容脚本的 dispatchEvent / element.click() 一律不可信 → 实测均无效
+// （CDP Input.dispatchMouseEvent 有效）。这里通过后台 service worker 的
+// chrome.debugger.attach + Input.dispatchMouseEvent 实现同样效果，
+// attach 只在点击瞬间，点完立即 detach。
+function clickViaDebugger(context, element) {
+  return new Promise((resolve) => {
+    try {
+      if (!element) { resolve(false); return; }
+      const rect = element.getBoundingClientRect();
+      const x = Math.round(rect.left + rect.width / 2);
+      const y = Math.round(rect.top + rect.height / 2);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) { resolve(false); return; }
+      const runtime = getRuntime();
+      if (!runtime || typeof runtime.sendMessage !== "function") { resolve(false); return; }
+      runtime.sendMessage({ type: "CDP_CLICK", payload: { x: x, y: y } }, (response) => {
+        let failed = false;
+        try { failed = Boolean(runtime.lastError); } catch (_lastError) { failed = true; }
+        resolve(!failed && Boolean(response && response.ok === true));
+      });
+    } catch (_debuggerClickError) {
+      resolve(false);
+    }
+  });
+}
+
 // 语音按钮点击：指针序列优先，失败回退原生 click（clickElementSafely）。
 function clickRecordTarget(context, element) {
   return clickWithPointerSequence(context, element);
@@ -3963,7 +3990,7 @@ function unipusHasInteractiveContent(doc) {
 function startUnipusIdleWatcher(context) {
   if (idleWatchState.timer) return;
   idleWatchState.lastActivityAt = Date.now();
-  idleWatchState.timer = setInterval(() => {
+  idleWatchState.timer = setInterval(async () => {
     try {
       const doc = getContextDocument(context);
       if (!doc) return;
@@ -4042,8 +4069,18 @@ function startUnipusIdleWatcher(context) {
         if (!idleWatchState.triedTabs.has(tabKey) || Date.now() - lastTabTryAt >= IDLE_ADVANCE_RETRY_MS) {
           idleWatchState.triedTabs.add(tabKey);
           idleWatchState.tabRetryAt[tabKey] = Date.now();
+          idleWatchState.lastActivityAt = Date.now();
+          // 2026-10-25【关键】：antd Tabs 只接受 isTrusted 事件。先试 chrome.debugger
+          // 真实点击（等价 DevTools 手点）；成功即返回。失败再退回合成事件序列。
+          try {
+            const viaDebugger = await clickViaDebugger(context, pendingTab);
+            if (viaDebugger) {
+              unipusLog(context,
+                `u校园子标签推进（真实点击）：切换到「${tabName.slice(0, 20)}」。`);
+              return;
+            }
+          } catch (_debuggerTabError) { /* 回退合成事件 */ }
           if (clickWithPointerSequence(context, pendingTab)) {
-            idleWatchState.lastActivityAt = Date.now();
             unipusLog(context,
               `u校园子标签推进：当前子标签无可答内容，切换到「${tabName.slice(0, 20)}」。`);
             return;

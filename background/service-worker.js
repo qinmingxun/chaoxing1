@@ -14,6 +14,7 @@ const CHAOXING_HOST_SUFFIXES = ['chaoxing.com'];
 const ALLOWED_MESSAGE_TYPES = new Set([
   'DEEPSEEK_CHAT',
   'QUESTION_BANK_LOOKUP',
+  'CDP_CLICK',
   'CX_STATUS',
   'CX_REPORT',
   'CX_DOCUMENT',
@@ -502,13 +503,55 @@ async function handleCache(type, payload) {
   return { saved: true };
 }
 
-async function dispatchMessage(message) {
+// 2026-10-25【用户提问"有没有插件可以让你操控鼠标"】：有 —— chrome.debugger API。
+// 背景：扩展内容脚本用 dispatchEvent / element.click() 产生的事件 isTrusted=false，
+// u校园顶部子标签（antd Tabs）会忽略它，导致"视频页点不了子标签、只能跳节"。
+// chrome.debugger.attach 之后可以直接发 CDP 的 Input.dispatchMouseEvent，
+// 产生**真实可信**的鼠标事件（与 DevTools 手动点击等价）。
+// 策略：只在点击瞬间 attach → 发 mouseMoved/Pressed/Released → 立即 detach，
+// 尽量缩短占用调试通道的时间。
+async function handleDebuggerClick(payload, sender) {
+  const tabId = sender && sender.tab && Number.isInteger(sender.tab.id)
+    ? sender.tab.id
+    : (isRecord(payload) && Number.isInteger(payload.tabId) ? payload.tabId : null);
+  if (!Number.isInteger(tabId)) {
+    throw new RequestError('INVALID_FIELD', 'tabId is unavailable', false);
+  }
+  const x = requireNumber(payload, 'x');
+  const y = requireNumber(payload, 'y');
+  const target = { tabId: tabId };
+  let attached = false;
+  try {
+    await chrome.debugger.attach(target, '1.3');
+    attached = true;
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent',
+      { type: 'mouseMoved', x: x, y: y, button: 'none', buttons: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent',
+      { type: 'mousePressed', x: x, y: y, button: 'left', buttons: 1, clickCount: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent',
+      { type: 'mouseReleased', x: x, y: y, button: 'left', buttons: 0, clickCount: 1 });
+    return { ok: true, x: x, y: y, via: 'chrome.debugger' };
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    throw new RequestError('DEBUGGER_CLICK_FAILED', message, false);
+  } finally {
+    if (attached) {
+      try { await chrome.debugger.detach(target); } catch (_detachError) { /* 未 attach 时忽略 */ }
+    }
+  }
+}
+
+async function dispatchMessage(message, sender) {
   if (!isRecord(message) || !ALLOWED_MESSAGE_TYPES.has(message.type)) {
     throw new RequestError('UNSUPPORTED_MESSAGE', 'message type is not allowed', false);
   }
   switch (message.type) {
     case 'DEEPSEEK_CHAT':
       return handleDeepSeek(message.payload);
+    case 'CDP_CLICK':
+      return handleDebuggerClick(message.payload, sender);
     case 'QUESTION_BANK_LOOKUP':
       return handleQuestionBankLookup(message.payload);
     case 'CX_STATUS':
@@ -529,7 +572,7 @@ if (globalThis.chrome && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const requestId = isRecord(message) && typeof message.requestId === 'string' ? message.requestId : '';
     Promise.resolve()
-      .then(() => dispatchMessage(message))
+      .then(() => dispatchMessage(message, sender))
       .then((data) => sendResponse(makeSuccess(requestId, data)))
       .catch((error) => {
         const normalized = error instanceof RequestError
