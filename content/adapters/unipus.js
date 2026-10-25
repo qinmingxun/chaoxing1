@@ -170,6 +170,7 @@ let loggedEncryptedContent = null;    // 密文日志去重（每条密文只 lo
 let keepAliveStop = null;             // startKeepAlive 返回的清理函数
 let submitInterceptorEnabled = false; // set-confirm 启用状态
 let bridgeInjectWarned = false;       // MAIN bridge 注入失败警告去重
+let sortableManualHintShown = false;  // 配对/排序题“建议手动完成”提示去重（每页一次）
 
 function asObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -2050,7 +2051,100 @@ async function runAutoAnswer(ctx) {
     }
   } catch (_voiceRetagError) { /* 识别失败按原逻辑走 */ }
 
-  // 2026-10-24：排序题（qtype=5）的 sortableWrapper/sortableItems 原先只在 DOM 降级路径
+  // 2026-10-25【React 直调方案·实测突破】配对/排序题（replyType=sequence）：
+// 模拟拖拽完全无效（CDP 真实点击、CDP 真实鼠标拖拽含 pressDelay 0/300/800ms、
+// 合成 HTML5 drag、合成 Touch 全部无法改变任何属性），但平台是 React 应用，
+// DOM 元素上挂着 fiber，从 #sortableListWrapper 往上能拿到 sortableList 组件的
+// memoizedProps.onSortEnd({oldIndex, newIndex})——直接调用它会真实改变句子顺序，
+// 且持久生效。实测语义：人物(图片)固定，重排的是句子，
+// 即「人物 i 配排序后第 i 个句子」。
+// desiredIndexes[i] = 期望排在位置 i 的句子【原始下标】（0 基）。
+function applySortableOrderViaReact(doc, desiredIndexes) {
+  const wrapper = safeQuery(doc, "#sortableListWrapper") ||
+    safeQuery(doc, ".sortable-list-wrapper");
+  if (!wrapper) return { ok: false, reason: "no-wrapper" };
+  const reactKey = Object.keys(wrapper).filter((key) =>
+    key.indexOf("__reactFiber$") === 0 || key.indexOf("__reactInternalInstance$") === 0)[0];
+  if (!reactKey) return { ok: false, reason: "no-react-fiber" };
+  let node = wrapper[reactKey];
+  let target = null;
+  let guard = 0;
+  while (node && guard < 40) {
+    guard += 1;
+    if (node.memoizedProps && typeof node.memoizedProps.onSortEnd === "function") {
+      target = node;
+      break;
+    }
+    node = node.return;
+  }
+  if (!target) return { ok: false, reason: "onSortEnd-not-found" };
+  const onSortEnd = target.memoizedProps.onSortEnd;
+
+  // 选择排序：逐位把期望的句子换到当前位置，每次调用一次 onSortEnd(from, to)。
+  const count = desiredIndexes.length;
+  if (!count) return { ok: false, reason: "empty-order" };
+  const current = Array.from({ length: count }, (_, index) => index); // current[位置] = 原始下标
+  let moved = 0;
+  for (let pos = 0; pos < count; pos += 1) {
+    const want = desiredIndexes[pos];
+    if (want === null || want === undefined) continue;
+    const from = current.indexOf(want);
+    if (from < 0 || from === pos) continue;
+    try {
+      onSortEnd({ oldIndex: from, newIndex: pos, collection: 0 });
+    } catch (_callError) { /* 单步失败继续 */ }
+    const [item] = current.splice(from, 1);
+    current.splice(pos, 0, item);
+    moved += 1;
+  }
+  return { ok: true, moved: moved, current: current };
+}
+
+// 答案 → 期望句子顺序（原始下标数组）。
+// 支持：① 字母数组 ["C","A","B"]；② 下标数组 [2,0,1]；③ 含句子文本的数组（按文本匹配）；
+//      ④ 逗号/# 分隔的字符串（以上任一）。
+function resolveSortableOrder(answer, optionTexts) {
+  const raw = [];
+  if (Array.isArray(answer)) raw.push(...answer);
+  else if (answer !== null && answer !== undefined) {
+    raw.push(...asString(answer).split(/[,，#;\n]/).map((part) => part.trim()).filter(Boolean));
+  }
+  if (!raw.length) return null;
+  const texts = (Array.isArray(optionTexts) ? optionTexts : []).map((t) =>
+    stripTagsHtml(asString(t)).replace(/\s+/g, " ").trim().toLowerCase());
+  const used = [];
+  const indexes = [];
+  for (const item of raw) {
+    const token = asString(item).trim();
+    let index = -1;
+    // ① 纯数字 → 视为下标（兼容 1 基：若全部 >0 且没有 0，则按 1 基处理）
+    // ② 单个字母 → 按字母序转下标
+    if (/^\d+$/.test(token)) {
+      index = Number(token);
+      if (index >= texts.length) index = index - 1; // 1 基回退
+    } else if (/^[A-Za-z]$/.test(token) && texts.length) {
+      index = token.toUpperCase().charCodeAt(0) - 65;
+    }
+    // ③ 文本匹配（取最像的，未被占用）
+    if (index < 0 || index >= texts.length || used.indexOf(index) !== -1) {
+      const needle = stripTagsHtml(token).replace(/\s+/g, " ").trim().toLowerCase();
+      index = -1;
+      let bestLen = 0;
+      for (let i = 0; i < texts.length; i += 1) {
+        if (used.indexOf(i) !== -1) continue;
+        if (!needle || !texts[i]) continue;
+        if (texts[i].indexOf(needle) !== -1 || needle.indexOf(texts[i]) !== -1) {
+          const len = Math.min(needle.length, texts[i].length);
+          if (len > bestLen) { bestLen = len; index = i; }
+        }
+      }
+    }
+    if (index < 0 || index >= texts.length || used.indexOf(index) !== -1) continue;
+    used.push(index);
+    indexes.push(index);
+  }
+  return indexes.length === texts.length ? indexes : null;
+}
   // （buildDomQuestion）提供；加密题包路径解析出的题目没有这两个字段 →
   // quiz-solver 的 callFillSortableAnswer 直接返回 no-sortable-elements，排序题永远答不了。
   // 这里统一从页面 DOM 补挂容器与可拖拽元素（两类路径都覆盖）。
@@ -2066,11 +2160,43 @@ async function runAutoAnswer(ctx) {
           if (!question || question.qtype !== 5) return;
           question.sortableWrapper = wrapper;
           question.sortableItems = sortableItems;
+          // 2026-10-25：挂 React 直调填答（quiz-solver 的 callFillQuestionAnswer 会优先用
+          // question.fillAnswer）。答案需能解析成“句子顺序”，支持 A-F 字母 / 下标 / 句子文本。
+          question.fillAnswer = async (answer) => {
+            const liveDoc = getContextDocument(context);
+            if (!liveDoc) return { filled: false, skipped: false, reason: "no-document" };
+            const questionOptions = Array.isArray(question.options) ? question.options : [];
+            const desired = resolveSortableOrder(answer, questionOptions);
+            if (!desired) {
+              return { filled: false, skipped: true, reason: "unparsable-sortable-answer" };
+            }
+            const result = applySortableOrderViaReact(liveDoc, desired);
+            if (result.ok) {
+              unipusLog(context,
+                `u校园配对/排序题：已通过 React onSortEnd 重排句子（移动 ${result.moved} 次）。`);
+              return { filled: true, skipped: false, moved: result.moved };
+            }
+            unipusWarn(context,
+              `u校园配对/排序题：React 直调失败（${result.reason}），本题跳过（可手动完成）。`);
+            return { filled: false, skipped: true, reason: result.reason };
+          };
           attached += 1;
         });
         unipusLog(context,
           `u校园排序题：已挂载排序容器（可拖拽元素 ${sortableItems.length} 个）到 ${attached} 道 qtype=5 题。` +
           (sortableItems.length < 2 ? '（元素不足 2 个，可能未渲染完成）' : ''));
+        // 2026-10-25 诚实提示（每页只报一次）：实测 u7g533（7-2 Sharing/Practice-3）这个
+        // replyType="sequence" 的题型其实是「6 人物图 ↔ 6 句子 A–F 配对」，由
+        // react-sortable-hoc 驱动。已尝试 CDP 真实点击/真实鼠标拖拽（含 pressDelay 0/300/800ms）/
+        // 合成 HTML5 drag/合成 Touch，均未改变任何属性（全属性 diff 无变化），说明该题
+        // 对无头事件不可靠响应。与其含糊地报“未获取到题目”，不如明确告知用户手动完成，
+        // 自动化本身会继续推进后续页面（不卡死）。
+        if (!sortableManualHintShown && sortableItems.length >= 2) {
+          sortableManualHintShown = true;
+          unipusWarn(context,
+            'u校园配对/排序题（replyType=sequence）：本页是“人物图 ↔ 句子 A–F”配对题，' +
+            '自动化暂无法可靠拖动或配对，建议手动完成本题；刷课会继续推进，不会卡住。');
+        }
       } else {
         unipusWarn(context, 'u校园排序题：页面未找到排序容器，qtype=5 题可能无法作答。');
       }
