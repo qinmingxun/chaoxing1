@@ -3702,7 +3702,21 @@ function findInactiveSubTab(doc) {
 function findFootLinkByText(doc, pattern) {
   if (!doc || typeof doc.querySelectorAll !== "function") return null;
   const seen = new Set();
-  for (const selector of ["#pc-foot > div > a", "#pc-foot a"]) {
+  // 2026-10-25【用户反馈"没有自动翻页"的直接根因】：旧版只查 #pc-foot，但实测
+  // 答题小结页（7-2 Sharing/Practice-N 的结束页）的「继续学习」是
+  // <div class="ant-layout-footer"><a class="btn">继续学习</a></div>，
+  // 根本不在 #pc-foot 里 → 查找恒为 null → 看门狗既点不到按钮也不翻页，只能反复滚动。
+  // 现扩展为多个候选（含 ant-layout-footer 与通用 a.btn 兜底）。
+  const selectors = [
+    "#pc-foot > div > a",
+    "#pc-foot a",
+    ".ant-layout-footer a",
+    ".ant-layout-footer .btn",
+    ".layout-footer a",
+    "footer a.btn",
+    "a.btn",
+  ];
+  for (const selector of selectors) {
     for (const link of safeQueryAll(doc, selector)) {
       if (seen.has(link)) continue;
       seen.add(link);
@@ -3865,6 +3879,27 @@ function startUnipusIdleWatcher(context) {
       if (busy) {
         idleWatchState.lastActivityAt = Date.now();
         return;
+      }
+      // 2026-10-25【用户反馈"没有自动翻页"的直接修复】：答题小结/答题情况页
+      // （每节结束页，如 7-2 Sharing/Practice-N 之后）应立即点「继续学习」推进，
+      // 而不是先滚动（情况 -1 会 return）、再等 STUCK/IDLE 阈值 20-60s。
+      // 旧逻辑下用户看到的就是"页面卡住不动、不翻页"。
+      if (idleWatchState.summaryAdvancedHash !== hash) {
+        try {
+          const bodyText = asString(doc.body && doc.body.innerText);
+          if (/答题小结|答题情况|答题解析|点击题号查看答题解析/.test(bodyText)) {
+            const summaryLink = findFootLinkByText(doc, /继续学习|下一题|提交/);
+            if (summaryLink && clickWithPointerSequence(context, summaryLink)) {
+              idleWatchState.summaryAdvancedHash = hash;
+              idleWatchState.advancedHash = hash;
+              idleWatchState.lastAdvanceAt = Date.now();
+              idleWatchState.lastActivityAt = Date.now();
+              unipusLog(context,
+                `u校园答题小结页：已点击「${asString(summaryLink.textContent).replace(/\s+/g, "").trim()}」立即翻页。`);
+              return;
+            }
+          }
+        } catch (_summaryAdvanceError) { /* 小结页识别失败按原逻辑走 */ }
       }
       const hasContent = unipusHasInteractiveContent(doc);
       const idleMs = Date.now() - idleWatchState.lastActivityAt;
