@@ -2154,7 +2154,14 @@ function resolveSortableOrder(answer, optionTexts) {
       const docForSortable = getContextDocument(context);
       const wrapper = docForSortable ? safeQuery(docForSortable, SORTABLE_CONTAINER_SELECTOR) : null;
       if (wrapper) {
-        const sortableItems = safeQueryAll(wrapper, SORTABLE_ITEM_SELECTOR);
+        const sortableItems = (() => {
+          // 2026-10-25：SORTABLE_ITEM_SELECTOR 里多个模式（.component-htmlview 与
+          // #sortableListWrapper > div）会重叠，导致日志出现"31 个"这种重复计数。
+          // 实测配对题的直接子 div 才是真实的配对单元（12 个 = 6 图 + 6 句），优先用它。
+          const directDivs = Array.from(wrapper.children || [])
+            .filter((child) => child && child.tagName === "DIV");
+          return directDivs.length >= 2 ? directDivs : safeQueryAll(wrapper, SORTABLE_ITEM_SELECTOR);
+        })();
         let attached = 0;
         questions.forEach((question) => {
           if (!question || question.qtype !== 5) return;
@@ -2186,16 +2193,18 @@ function resolveSortableOrder(answer, optionTexts) {
           `u校园排序题：已挂载排序容器（可拖拽元素 ${sortableItems.length} 个）到 ${attached} 道 qtype=5 题。` +
           (sortableItems.length < 2 ? '（元素不足 2 个，可能未渲染完成）' : ''));
         // 2026-10-25 诚实提示（每页只报一次）：实测 u7g533（7-2 Sharing/Practice-3）这个
-        // replyType="sequence" 的题型其实是「6 人物图 ↔ 6 句子 A–F 配对」，由
-        // react-sortable-hoc 驱动。已尝试 CDP 真实点击/真实鼠标拖拽（含 pressDelay 0/300/800ms）/
-        // 合成 HTML5 drag/合成 Touch，均未改变任何属性（全属性 diff 无变化），说明该题
-        // 对无头事件不可靠响应。与其含糊地报“未获取到题目”，不如明确告知用户手动完成，
-        // 自动化本身会继续推进后续页面（不卡死）。
+        // replyType="sequence" 的题型其实是「6 人物图 ↔ 6 句子 A–F 配对」。
+        // 交互层已打通（见 applySortableOrderViaReact：React fiber 直调 onSortEnd 可真实重排
+        // 且持久生效，脚本层已实测）；但**正确答案必须靠“听 podcast Part 2 判断谁说了哪句”**，
+        // 而求解只拿得到文本、看不到 6 张人物图片 → 无法可靠产出顺序。
+        // 因此明确告知用户手动确认，而不是含糊地报“未获取到题目”；自动化继续推进不卡死。
         if (!sortableManualHintShown && sortableItems.length >= 2) {
           sortableManualHintShown = true;
           unipusWarn(context,
-            'u校园配对/排序题（replyType=sequence）：本页是“人物图 ↔ 句子 A–F”配对题，' +
-            '自动化暂无法可靠拖动或配对，建议手动完成本题；刷课会继续推进，不会卡住。');
+            'u校园配对/排序题（replyType=sequence）：本页是“人物图 ↔ 句子 A–F”配对题。' +
+            '交互已支持（React 直调可重排），但正确答案需听 podcast 判断“谁说了哪句”，' +
+            '自动求解只拿得到文本、看不到图片，无法可靠给出；建议手动完成本题或在题库中配置答案。' +
+            '刷课会继续推进，不会卡住。');
         }
       } else {
         unipusWarn(context, 'u校园排序题：页面未找到排序容器，qtype=5 题可能无法作答。');
