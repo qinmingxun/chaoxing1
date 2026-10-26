@@ -3390,6 +3390,10 @@ async function simulateVoiceRecordingsInner(context) {
       // 既无"下一题"也无未完成 tab：整页语音题完成
       unipusLog(context,
         `u校园语音题：第 ${questionIndex + 1} 题完成，无"下一题"且无未完成练习组（整页语音题处理完毕，共 ${questionIndex + 1} 题）。`);
+      // 2026-10-26【真机实测 u1g11：空转约 2 分钟才推进】语音题整页处理完后，页面仍留有
+      // 录音按钮，unipusHasInteractiveContent 因此判定"有内容"→ 看门狗走 60s 阈值 + 一轮
+      // 滚动，白等约 2 分钟。此处标记"本页已无待处理题目"，让看门狗改用 STUCK_ESCAPE_FAST_MS(20s)。
+      try { unipusNoQuestionConfirmedAt = Date.now(); } catch (_flagError) { /* 忽略 */ }
       break;
     } catch (loopError) {
       unipusWarn(context, `u校园语音题：第 ${questionIndex + 1} 题处理异常，停止循环：${loopError && loopError.message ? loopError.message : String(loopError)}`);
