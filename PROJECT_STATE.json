@@ -214,7 +214,7 @@
     }
   },
   "next": [
-    "P0 待用户真机端到端（v81）：登录 uai.unipus.cn 后点「开始刷课」跑一轮，确认 ①视频/听力播完自动推进（media ended）②面板自身输入框不再被误判为待作答控件 ③子标签按 DOM 顺序向后切换（chrome.debugger 可信事件）④无题可答时走左侧目录下一节；并确认「还有 N 道题没有作答」是否归零",
+    "✅ P0 真机端到端已通过（2026-10-26，扩展 v2026-10-20.81）：调试 profile 中真实课程连续跑完 Unit 1 全部 24 个节并自动进入 Unit 2（40 分钟 / 87 个 CDP 快照）；证据=媒体播完立即推进、子标签按 DOM 顺序切换（Role-playit/Organizeideas/Passages/Quiz/Wordsincontext）、语音题逐题录音与「下一题」、填空题「已同步填入页面输入框 8 处」、提交 answerCount=3/8/4、全程 0 次未获得答案 / 0 次 API 失败。原始证据见 docs/E2E-2026-10-26.md",
     "P0 题库：外部 API 通道已就绪（v57 查询 + v58 一键测试，面板填地址/Key 即生效），但仍无公开可用服务；未配置时自动回退 DeepSeek",
     "P1：下拉题支持（.ant-select / .ant-dropdown-trigger / li.select-option）",
     "P1：itest 混合题型（qindex 属性的 radio + blankinput）",
@@ -224,9 +224,9 @@
     "已知硬限制（非待办）：子标签切换只认 isTrusted 事件，且同一标签只能有一个调试客户端（外部 CDP 会抢占 chrome.debugger）；7-2 Practice-3 配对题答案需人工/题库（仅保证排序能力）"
   ],
   "blocked": [
-    "P0 手动端到端测试需用户点击「开始刷课」（当前为停止态，避免自动操作真实课程）；题库 API 地址/Key 由用户决定是否提供"
+    "题库 API 地址/Key 仍待用户提供（通道已就绪，填入即生效；未配置时自动回退 DeepSeek）"
   ],
-  "last_updated": "2026-10-26T09:30:00.000Z",
+  "last_updated": "2026-10-26T12:30:00.000Z",
   "current_version": "v2026-10-20.81（service-worker sender 修复）",
   "version_authority": "以 git HEAD（E:/刷课 main）与 content/loader.js 的 ADAPTER_VERSION 为准；manifest.json 的 version 恒为 1.0.0，不代表实际版本",
   "handoff_2026_10_22": {
