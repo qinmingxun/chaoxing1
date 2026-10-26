@@ -220,14 +220,14 @@
     "P1：itest 混合题型（qindex 属性的 radio + blankinput）",
     "P2：章节跳过清单（SkipManager）、刷新后自动恢复挂机、页内 toast + 进度浮窗",
     "P3：英音/美音选择、录音时长与延迟可调",
-    "已完成、待用户确认（勿重复实现）：v80 防漂移状态同步（68832f6）；v81 service-worker onMessage 回调 sender 修复（题库/DeepSeek 全链路恢复，离线台 normal+deaf 双模式 ALL-PASS）；v71 排序/配对题 React fiber onSortEnd 直调；v74 qtype=5 白名单；v75 media ended 自动推进；v76 面板输入框排除；v77 子标签向后翻页；v78 子标签提前检查+90s 冷却；v79 chrome.debugger 可信点击",
+    "已完成、待用户确认（勿重复实现）：v82 语音题整页完成后快速推进（419a5c4，修 u1g11 约 2 分钟空转）；v80 防漂移状态同步（68832f6）；v81 service-worker onMessage 回调 sender 修复（题库/DeepSeek 全链路恢复，离线台 normal+deaf 双模式 ALL-PASS）；v71 排序/配对题 React fiber onSortEnd 直调；v74 qtype=5 白名单；v75 media ended 自动推进；v76 面板输入框排除；v77 子标签向后翻页；v78 子标签提前检查+90s 冷却；v79 chrome.debugger 可信点击",
     "已知硬限制（非待办）：子标签切换只认 isTrusted 事件，且同一标签只能有一个调试客户端（外部 CDP 会抢占 chrome.debugger）；7-2 Practice-3 配对题答案需人工/题库（仅保证排序能力）"
   ],
   "blocked": [
     "题库 API 地址/Key 仍待用户提供（通道已就绪，填入即生效；未配置时自动回退 DeepSeek）"
   ],
-  "last_updated": "2026-10-26T12:30:00.000Z",
-  "current_version": "v2026-10-20.81（service-worker sender 修复）",
+  "last_updated": "2026-10-26T13:45:00.000Z",
+  "current_version": "v2026-10-20.82（语音题完成快速推进）",
   "version_authority": "以 git HEAD（E:/刷课 main）与 content/loader.js 的 ADAPTER_VERSION 为准；manifest.json 的 version 恒为 1.0.0，不代表实际版本",
   "handoff_2026_10_22": {
     "summary": "题库 API 接入（API-only）落地：QUESTION_BANK_LOOKUP（service-worker）→ quiz-solver 优先查题库、命中写缓存，未命中/未配置/失败回退 DeepSeek；页内面板新增题库地址/Key；离线验证台 mock 题库 ALL-PASS（v57）；真机面板 8/8 PASS（保存/持久化/清空/停止态保持）",
