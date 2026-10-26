@@ -36,11 +36,11 @@ u校园 AI 版全自动刷课循环：拦截新题 → 解密求解（DeepSeek�
   3. 新 profile 无登录态 → 需在调试窗口登录一次 u校园
   4. CDP 驱动：`curl http://127.0.0.1:9222/json/list` 拿 webSocketDebuggerUrl，Node 24 原生 WebSocket 直连
   5. 视口太小用 `Emulation.setDeviceMetricsOverride {width:1600,height:950,deviceScaleFactor:1}` 修正
-  6. 验证扩展版本：页面执行 `document.documentElement.dataset.courseHelperVersion` → 应为 `v2026-10-20.6（MouseEvent 坐标修复）`
+  6. 验证扩展版本：页面执行 `document.documentElement.dataset.courseHelperVersion` 取运行时版本串，再与 `git log --oneline -1` 及 `content/loader.js` 的 `ADAPTER_VERSION` 对齐——**不要在本文件写死版本号**（此前写死的 v2026-10-20.6 已过期 70+ 个版本，本身即是漂移源；权威值见 PROJECT_STATE.json 的 version_authority）
 - **真实平台域名**：AI 版主站 `uai.unipus.cn`（U校园5.0）；刷课页在 `ucontent.unipus.cn/_explorationpc_default/pc.html`（SPA hash 路由）——两者均被 manifest 的 `*://*.unipus.cn/*` 覆盖
 
 ## 记忆沉淀（跨会话防丢失）
 
 - 本文件是权威指令；另维护 `MEMORY.md`（一行一条、带日期前缀、只追加）：新踩的坑、新发现的页面结构/选择器变化、新的硬约束数字（端口/路径/版本）写入那里
-- 动手前先读本文件 + `PROJECT_STATE.json` + `MEMORY.md`（如存在）
+- 动手前先读本文件 + `PROJECT_STATE.json` + 工作区记忆 `D:\UserData\Documents\deepseek-harness\default-workspace\MEMORY.md`（该文件不在本仓库内，随 DSH 工作区走；其末尾有【防漂移锚点】区块，迁移前先更新）
 - 会话结束或换会话（含 Bridge 迁移）前：检查本次会话有无应沉淀进 MEMORY.md 的新事实；交接摘要的"关键文件"段必须列出本文件和 MEMORY.md
