@@ -569,7 +569,7 @@ async function dispatchMessage(message, sender) {
 }
 
 if (globalThis.chrome && chrome.runtime && chrome.runtime.onMessage) {
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const requestId = isRecord(message) && typeof message.requestId === 'string' ? message.requestId : '';
     Promise.resolve()
       .then(() => dispatchMessage(message, sender))
