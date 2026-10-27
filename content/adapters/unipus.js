@@ -2100,6 +2100,111 @@ function applySortableOrderViaReact(doc, desiredIndexes) {
   return { ok: true, moved: moved, current: current };
 }
 
+// ---- v86（2026-10-27）：qtype=5 排序/配对题的本地字幕求解（零 token）----
+// 原理（当日实测 u2g531/2-2 Sharing Practice-5）：题目数据包里 replyType=sequence 的
+// contents[] 自带 subtitles[].path / vttPath（完整英文字幕 VTT 直链，CDN 公开可 fetch）。
+// 把 options 的句子按"在字幕 cue 中首次出现的顺序"排序即为配对顺序（6/6 实测全匹配）。
+// 只在"全部选项都能匹配"时给答案；任何一句匹配不上就返回 null（维持跳过，不瞎猜）。
+function normalizeVttText(text) {
+  return asString(text).toLowerCase()
+    .replace(/<[^>]*>/g, '')
+    .replace(/&[a-z]+;/gi, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseVttCues(vttRaw) {
+  return asString(vttRaw).split(/\r?\n\r?\n/).map((block) =>
+    block.split(/\r?\n/)
+      .filter((line) => line && !/^WEBVTT/i.test(line) && !/^\d+$/.test(line) && line.indexOf('-->') === -1)
+      .join(' ')
+      .trim())
+    .filter(Boolean);
+}
+
+function matchOptionToCueIndex(optionText, cueTexts) {
+  const normalized = normalizeVttText(optionText);
+  if (normalized.length < 12) return -1;
+  // 优先：整句前 40 字符被某条 cue 包含。
+  const head = normalized.slice(0, 40);
+  for (let i = 0; i < cueTexts.length; i += 1) {
+    if (cueTexts[i].indexOf(head) !== -1) return i;
+  }
+  // 退化：选项中任一连续 4 词片段被某条 cue 包含（视频字幕常按语气断句）。
+  const words = normalized.split(' ').filter(Boolean);
+  for (let w = 0; w + 4 <= words.length; w += 1) {
+    const seg = words.slice(w, w + 4).join(' ');
+    if (seg.length <= 12) continue;
+    for (let i = 0; i < cueTexts.length; i += 1) {
+      if (cueTexts[i].indexOf(seg) !== -1) return i;
+    }
+  }
+  return -1;
+}
+
+// 从本页拦截到的题包（含已解密原文）里找 sequence 题的 VTT 地址并求解顺序。
+// 返回 { order: 'B#A#D#F#C#E' } 或 null。
+async function solveSortableFromLocalSubtitles(context, question) {
+  try {
+    const doc = getContextDocument(context);
+    if (!doc) return null;
+    // 1) 收集候选 VTT：题包解密原文（interceptedQuestions 缓存）+ 页面 DOM 中的 vtt 引用。
+    const vttCandidates = [];
+    for (const item of interceptedQuestions) {
+      let plain = item && item.__decryptedPlain;
+      if (!plain && item && item.content && item.k) {
+        try {
+          const hex = await decryptUnipusHexContent(item.content, item.k);
+          if (hex) { item.__decryptedPlain = hex; plain = hex; }
+        } catch (_e) { /* 解密失败跳过 */ }
+      }
+      if (!plain) continue;
+      const matches = plain.match(/https?:\/\/[^"'\\ ]+\.vtt/g) || [];
+      for (const url of matches) vttCandidates.push(url);
+    }
+    // DOM 兜底：video 元素的 track 字幕。
+    try {
+      const tracks = safeQueryAll(doc, 'video track[src], audio track[src]');
+      for (const track of tracks) {
+        const src = asString(track.getAttribute('src'));
+        if (/\.vtt(\?|$)/i.test(src)) vttCandidates.push(src);
+      }
+    } catch (_domError) { /* 忽略 */ }
+    if (!vttCandidates.length) return null;
+
+    // 2) 题干选项文本。
+    const options = Array.isArray(question && question.options) ? question.options : [];
+    if (options.length < 2) return null;
+
+    // 3) 逐个 VTT 尝试：全部选项都能匹配上才算解。
+    const seenVtt = Object.create(null);
+    for (const vttUrl of vttCandidates) {
+      if (seenVtt[vttUrl]) continue;
+      seenVtt[vttUrl] = true;
+      let vttRaw = '';
+      try {
+        const response = await fetch(vttUrl, { credentials: 'omit' });
+        if (response && response.ok) vttRaw = await response.text();
+      } catch (_fetchError) { continue; }
+      if (!vttRaw) continue;
+      const cueTexts = parseVttCues(vttRaw).map(normalizeVttText).filter(Boolean);
+      if (!cueTexts.length) continue;
+      const ranked = options.map((option) => ({
+        name: asString(option && option.name !== undefined ? option.name : option),
+        text: asString(option && option.text !== undefined ? option.text : option),
+      })).map((entry) => ({ ...entry, cueIndex: matchOptionToCueIndex(entry.text, cueTexts) }));
+      if (ranked.some((entry) => entry.cueIndex === -1)) continue; // 有句子匹配不上 → 换下一个 VTT
+      const ordered = ranked.slice().sort((a, b) => a.cueIndex - b.cueIndex);
+      const order = ordered.map((entry) => entry.name).join('#');
+      return { order, vttUrl, matched: ranked.length + '/' + options.length };
+    }
+    return null;
+  } catch (_error) {
+    return null;
+  }
+}
+
 // 答案 → 期望句子顺序（原始下标数组）。
 // 支持：① 字母数组 ["C","A","B"]；② 下标数组 [2,0,1]；③ 含句子文本的数组（按文本匹配）；
 //      ④ 逗号/# 分隔的字符串（以上任一）。
@@ -2189,6 +2294,25 @@ function resolveSortableOrder(answer, optionTexts) {
           };
           attached += 1;
         });
+        // v86：本地字幕求解——题包自带 VTT 时直接算出顺序并落地（零 token），
+        // 不再依赖 DeepSeek（它看不到人物图片，答案不可靠）。
+        (async () => {
+          try {
+            for (const question of questions) {
+              if (!question || question.qtype !== 5) continue;
+              const solved = await solveSortableFromLocalSubtitles(context, question);
+              if (!solved) {
+                unipusLog(context, 'u校园排序题：本页字幕未能匹配全部选项（或无 VTT），维持跳过（不瞎猜）。');
+                continue;
+              }
+              const fill = question.fillAnswer;
+              if (typeof fill !== 'function') continue;
+              const result = await fill(solved.order);
+              unipusLog(context,
+                `u校园排序题：字幕求解成功（${solved.matched} 匹配，VTT=…${asString(solved.vttUrl).slice(-30)}）→ 顺序 ${solved.order}，落地${result && result.filled ? '成功' : '失败'}。`);
+            }
+          } catch (_vttError) { /* 字幕求解失败不阻塞 */ }
+        })();
         unipusLog(context,
           `u校园排序题：已挂载排序容器（可拖拽元素 ${sortableItems.length} 个）到 ${attached} 道 qtype=5 题。` +
           (sortableItems.length < 2 ? '（元素不足 2 个，可能未渲染完成）' : ''));
