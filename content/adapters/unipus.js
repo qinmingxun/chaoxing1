@@ -2331,9 +2331,26 @@ function resolveSortableOrder(answer, optionTexts) {
               }
               const fill = question.fillAnswer;
               if (typeof fill !== 'function') continue;
-              const result = await fill(solved.order);
               unipusLog(context,
-                `u校园排序题：字幕求解成功（${solved.matched} 匹配，VTT=…${asString(solved.vttUrl).slice(-30)}）→ 顺序 ${solved.order}，落地${result && result.filled ? '成功' : '失败'}。`);
+                `u校园排序题：字幕求解成功（${solved.matched} 匹配，VTT=…${asString(solved.vttUrl).slice(-30)}）→ 顺序 ${solved.order}，开始落地。`);
+              // v88（2026-10-27 真机 u2g531 实测）：求解成功时配对 UI 可能尚未渲染
+              // （React 直调报 no-react-fiber/no-wrapper）——句子列表随视频/交互异步出现。
+              // 改为带重试的落地：最多 20 次 x 3s；成功即止。全部失败仅警告（不重复提交）。
+              let landed = false;
+              for (let attempt = 0; attempt < 20 && !landed; attempt += 1) {
+                try {
+                  const result = await fill(solved.order);
+                  landed = Boolean(result && result.filled);
+                } catch (_fillError) { landed = false; }
+                if (landed) {
+                  unipusLog(context, `u校园排序题：落地成功（第 ${attempt + 1} 次尝试，onSortEnd 重排完成）。`);
+                  break;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 3000));
+              }
+              if (!landed) {
+                unipusWarn(context, 'u校园排序题：字幕答案已求得但 60s 内未能落地（配对 UI 未渲染）。本题维持未作答，请手动完成或稍后重试「本页立即执行」。');
+              }
             }
           } catch (_vttError) { /* 字幕求解失败不阻塞 */ }
         })();
