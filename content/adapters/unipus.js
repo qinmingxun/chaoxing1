@@ -2274,8 +2274,17 @@ function installSortableLandingObserver(context) {
     (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
   if (!MutationObserverCtor) return;
   try {
+    // v89.1（2026-10-27 真机事故修复）：observer 回调风暴——平台视频/语音阶段高频重渲染，
+    // 每次回调都做 DOM 查询会打满主线程（实测页面 JS 卡死、CDP evaluate 超时）。
+    // 改为：①pending 不存在时直接返回（零开销）；②500ms debounce 合并高频回调。
+    let landingDebounceTimer = null;
     sortableLandingObserver = new MutationObserverCtor(() => {
-      try { tryLandPendingSortable(context || activeContext); } catch (_e) { /* 忽略 */ }
+      if (!pendingSortableLanding) return; // 无待落地答案时零开销
+      if (landingDebounceTimer) return;
+      landingDebounceTimer = setTimeout(() => {
+        landingDebounceTimer = null;
+        try { tryLandPendingSortable(context || activeContext); } catch (_e) { /* 忽略 */ }
+      }, 500);
     });
     sortableLandingObserver.observe(doc, { childList: true, subtree: true });
   } catch (_error) { sortableLandingObserver = null; }
