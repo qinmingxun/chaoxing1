@@ -509,7 +509,7 @@
     // 避免"改了代码但浏览器跑的是旧版"的排查浪费。修改 unipus.js/bridge 后递增。
     // 同时写入 DOM 属性：控制台执行 document.documentElement.dataset.courseHelperVersion
     // 即可秒查当前运行版本（页面可见/可查，不依赖日志滚动）。
-    const ADAPTER_VERSION = 'v2026-10-20.88（排序题落地重试）';
+    const ADAPTER_VERSION = 'v2026-10-20.89（排序题observer落地）';
     try {
       console.log('[course-helper] [course-helper] 扩展已加载：' + adapterEntry.name +
         ' 适配器 ' + ADAPTER_VERSION);

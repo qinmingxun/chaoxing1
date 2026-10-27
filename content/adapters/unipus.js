@@ -2229,6 +2229,68 @@ async function solveSortableFromLocalSubtitles(context, question) {
   }
 }
 
+// ---- v89（2026-10-27）：排序题落地的事件驱动机制 ----
+// 真机实测：配对 UI（.sortable-list-wrapper）在视频/语音子流程完成后才渲染，
+// v88 的定时重试（20x3s）窗口内可能始终不出现（u2g531：7 道语音做完直接翻页）。
+// 此处改为：求解成功即缓存答案 + 安装 MutationObserver 监听 wrapper 出现，
+// 出现瞬间自动落地；observer 常驻（幂等），跨页保留 pending 直到落地或页面销毁。
+let pendingSortableLanding = null;   // { order, fill, question, context, solvedAt }
+let sortableLandingObserver = null;  // MutationObserver 实例（幂等安装）
+
+function tryLandPendingSortable(context) {
+  if (!pendingSortableLanding) return false;
+  const doc = getContextDocument(context || activeContext);
+  if (!doc) return false;
+  const wrapper = safeQuery(doc, '#sortableListWrapper') || safeQuery(doc, '.sortable-list-wrapper');
+  if (!wrapper || !(wrapper.children && wrapper.children.length >= 2)) return false;
+  const pending = pendingSortableLanding;
+  pendingSortableLanding = null; // 先取走防重入
+  const fill = pending.fill;
+  if (typeof fill !== 'function') return false;
+  Promise.resolve()
+    .then(() => fill(pending.order))
+    .then((result) => {
+      if (result && result.filled) {
+        unipusLog((context || activeContext),
+          `u校园排序题（observer）：配对 UI 已渲染，落地成功（顺序 ${pending.order}，onSortEnd 重排完成）。`);
+        scheduleAutoSubmitForLanded(context || activeContext);
+      } else {
+        unipusWarn((context || activeContext),
+          `u校园排序题（observer）：落地未成功（${result && result.reason}），稍后由重试兜底。`);
+        // 落地未成功：还原 pending 让下一轮再试
+        if (!pendingSortableLanding) pendingSortableLanding = pending;
+      }
+    })
+    .catch(() => { if (!pendingSortableLanding) pendingSortableLanding = pending; });
+  return true;
+}
+
+function installSortableLandingObserver(context) {
+  if (sortableLandingObserver) return; // 幂等
+  const doc = getContextDocument(context || activeContext);
+  if (!doc || typeof doc.querySelector !== 'function') return;
+  const MutationObserverCtor =
+    (doc.defaultView && doc.defaultView.MutationObserver) ||
+    (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
+  if (!MutationObserverCtor) return;
+  try {
+    sortableLandingObserver = new MutationObserverCtor(() => {
+      try { tryLandPendingSortable(context || activeContext); } catch (_e) { /* 忽略 */ }
+    });
+    sortableLandingObserver.observe(doc, { childList: true, subtree: true });
+  } catch (_error) { sortableLandingObserver = null; }
+}
+
+// 落地成功后调度提交（若自动提交开启）：复用既有调度入口。
+function scheduleAutoSubmitForLanded(context) {
+  try {
+    // 直接复用 runAutoAnswer 的提交兜底路径成本高；此处轻量做法：触发一次「本页立即执行」
+    // 的提交分支 —— 但为避免整轮重跑，仅当 autoAnswer 开启时由看门狗的常规逻辑收尾。
+    // 保守起见：只记日志，提交交给既有 watchdog/语音循环收尾（已验证不冲突）。
+    unipusLog(context, 'u校园排序题：落地完成，提交由既有流程收尾。');
+  } catch (_e) { /* 忽略 */ }
+}
+
 // 答案 → 期望句子顺序（原始下标数组）。
 // 支持：① 字母数组 ["C","A","B"]；② 下标数组 [2,0,1]；③ 含句子文本的数组（按文本匹配）；
 //      ④ 逗号/# 分隔的字符串（以上任一）。
@@ -2332,24 +2394,29 @@ function resolveSortableOrder(answer, optionTexts) {
               const fill = question.fillAnswer;
               if (typeof fill !== 'function') continue;
               unipusLog(context,
-                `u校园排序题：字幕求解成功（${solved.matched} 匹配，VTT=…${asString(solved.vttUrl).slice(-30)}）→ 顺序 ${solved.order}，开始落地。`);
-              // v88（2026-10-27 真机 u2g531 实测）：求解成功时配对 UI 可能尚未渲染
-              // （React 直调报 no-react-fiber/no-wrapper）——句子列表随视频/交互异步出现。
-              // 改为带重试的落地：最多 20 次 x 3s；成功即止。全部失败仅警告（不重复提交）。
+                `u校园排序题：字幕求解成功（${solved.matched} 匹配，VTT=…${asString(solved.vttUrl).slice(-30)}）→ 顺序 ${solved.order}，等待配对 UI 渲染后落地。`);
+              // v89（2026-10-27 真机 u2g531 二次实测）：定时重试不可靠——配对 UI 在语音
+              // 子流程后才渲染（u2g531 是 7 道语音做完直接翻页，60s 窗口内 wrapper 未出现）。
+              // 改为事件驱动：缓存答案 + MutationObserver 监听 wrapper 出现瞬间落地；
+              // 短轮询 12x5s 仅作兜底（observer 失效时）。
+              pendingSortableLanding = {
+                order: solved.order,
+                fill: fill,
+                question: question,
+                context: context,
+                solvedAt: Date.now(),
+              };
+              installSortableLandingObserver(context);
+              // 立即试一次（wrapper 可能已渲染）
+              tryLandPendingSortable(context);
               let landed = false;
-              for (let attempt = 0; attempt < 20 && !landed; attempt += 1) {
-                try {
-                  const result = await fill(solved.order);
-                  landed = Boolean(result && result.filled);
-                } catch (_fillError) { landed = false; }
-                if (landed) {
-                  unipusLog(context, `u校园排序题：落地成功（第 ${attempt + 1} 次尝试，onSortEnd 重排完成）。`);
-                  break;
-                }
-                await new Promise((resolve) => setTimeout(resolve, 3000));
+              for (let attempt = 0; attempt < 12 && !landed; attempt += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 5000));
+                if (!pendingSortableLanding) { landed = true; break; } // observer 已落地并清空
+                landed = tryLandPendingSortable(context);
               }
-              if (!landed) {
-                unipusWarn(context, 'u校园排序题：字幕答案已求得但 60s 内未能落地（配对 UI 未渲染）。本题维持未作答，请手动完成或稍后重试「本页立即执行」。');
+              if (!landed && pendingSortableLanding) {
+                unipusWarn(context, 'u校园排序题：字幕答案已缓存，等待配对 UI 渲染（observer 常驻监听中，60s 兜底未触发）。渲染后将自动落地。');
               }
             }
           } catch (_vttError) { /* 字幕求解失败不阻塞 */ }
@@ -2381,6 +2448,9 @@ function resolveSortableOrder(answer, optionTexts) {
   const solvableQuestions = [];
   questions.forEach((question, index) => {
     if (question && question.__isVoice === true) return;
+    // v89：qtype=5（排序/配对）不送 DeepSeek——答案由 v86 字幕求解负责（省 token，且模型看不到图）；
+    // 字幕求解在 attach 块处理，无 VTT 的配对题维持跳过（不瞎猜）。
+    if (question && question.qtype === 5) return;
     solvableIndexes.push(index);
     solvableQuestions.push(question);
   });
