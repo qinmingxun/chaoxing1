@@ -2544,7 +2544,10 @@ function installPageFillObserver(context, answers) {
   if (!MutationObserverCtor) return;
   try {
     pageFillObserver = new MutationObserverCtor(() => {
-      if (fillAnswersToPage(doc, textAnswers) > 0) {
+      // 2026-10-27【真机根因】此回调闭包里的参数名是 answers，却写成 textAnswers →
+      // 每次 DOM 变化都抛 Uncaught ReferenceError（console 刷屏），观察者等于失效，
+      // 延迟渲染的输入框永远填不上。改用形参 answers。
+      if (fillAnswersToPage(doc, answers) > 0) {
         unipusLog(context, `u校园页面填答（观察者）：答案已填入输入框。`);
         stopPageFillObserver();
         // 延迟渲染的输入框填答完成后，同样调度自动提交（autoSubmit 开关内部判定）。
