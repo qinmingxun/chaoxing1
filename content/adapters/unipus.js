@@ -2611,8 +2611,10 @@ const VOICE_NEXT_QUESTION_SETTLE_MS = 2500; // 点"下一题"后新题渲染等�
 //   15s/题 → 0 道未作答（v28，约170s/页）；5s/题 → 4 道未作答（v29，116s）；
 //   5s/题 + 提交前统一等15s → 仍 4 道未作答（v30，131s）——证明起作用的是
 //   【每题离开前的等待】（登记在切题前完成），而非总时长。本版取 10s 折中。
-// 若 10s 仍出现未作答，请回调至 15s（v28 已验证 0 未作答）。
-const VOICE_SCORE_WAIT_MS = 10000;
+// 2026-10-27【真机证据·用户要求成绩计入时尽量高分】真机日志持续出现
+// 「评分等待超时（10s）」= 评分未在 10s 内出现即切题 → 该题可能被记为未作答。
+// 按本段指引回调至 15s（v28 实测 15s/题 → 0 道未作答）。
+const VOICE_SCORE_WAIT_MS = 15000;
 const VOICE_SCORE_SELECTORS = [".score_layout", ".practice-score .score", ".score-wrapper .score", ".oral-score"];
 
 function readRecordedScore(doc) {
