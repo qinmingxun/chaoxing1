@@ -221,14 +221,18 @@
       }
 
       if (typeof candidate === 'number') {
-        return Number.isInteger(candidate) && candidate >= 0 && candidate <= 4 ? candidate : null;
+        // 2026-10-27【真机 u2g78 根因】原先上限是 4，qtype=5（排序/配对题）被解析为 null →
+        // buildQuestionBankPayload / buildDeepSeekPayload 抛 'qtype must be one of 0..4'
+        // → 这类题拿不到答案 → 整页 6 道 qtype=5 未获得答案 → 答案队列不下发 → 提交后被平台
+        // 拒绝 → 用户看到「翻页不成功」。service-worker 白名单 v74 已含 5，这里漏改。
+        return Number.isInteger(candidate) && candidate >= 0 && candidate <= 5 ? candidate : null;
       }
 
       var text = normalizeUnicode(candidate).trim();
       if (!text) {
         return null;
       }
-      if (/^[0-4]$/.test(text)) {
+      if (/^[0-5]$/.test(text)) {
         return Number(text);
       }
 
@@ -797,7 +801,7 @@
       var qtype = parseQuestionType(input.qtype !== undefined ? input.qtype :
         (input.type !== undefined ? input.type : input.questionType));
       if (qtype === null) {
-        throw new TypeError('qtype must be one of 0, 1, 2, 3 or 4');
+        throw new TypeError('qtype must be one of 0, 1, 2, 3, 4 or 5');
       }
       var options = input.options === undefined ? [] : asArray(input.options).map(optionText);
       var payload = {
@@ -825,7 +829,7 @@
       var qtype = parseQuestionType(input.qtype !== undefined ? input.qtype :
         (input.type !== undefined ? input.type : input.questionType));
       if (qtype === null) {
-        throw new TypeError('qtype must be one of 0, 1, 2, 3 or 4');
+        throw new TypeError('qtype must be one of 0, 1, 2, 3, 4 or 5');
       }
       return {
         domain: normalizeDomain(input.domain !== undefined ? input.domain : input.location),
