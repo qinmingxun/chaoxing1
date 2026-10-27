@@ -1431,7 +1431,14 @@ function buildDomQuestion(container) {
     // 2026-10-23：先检测排序/拖拽题（.sortable-list-wrapper / .sequence-container / .sequence-pc-card）
     const sortableWrapper = safeQuery(container, '.sortable-list-wrapper, .sequence-container, .sequence-pc-card, [class*="sortable"], [class*="sequence"]');
     if (sortableWrapper) {
-      const sortableItems = safeQueryAll(sortableWrapper, 'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item');
+      // 2026-10-27【v87 真机 u2g822 根因】：配对页的直接子元素是无类名的 DIV（数字行+句子行交替，
+      // 12 个 = 6 图位 + 6 句），旧选择器 'li,[draggable],...' 全落空 → sortableItems=0 →
+      // qtype 保持 null → buildDomQuestion 返回 null → 整页题目提取为空 → v86 永不触发。
+      // 与 attach 处（directDivs 优先）保持一致：先取直接子 DIV，退化到旧选择器。
+      const directDivs = Array.from(sortableWrapper.children || [])
+        .filter((child) => child && child.tagName === 'DIV');
+      const sortableItems = directDivs.length >= 2 ? directDivs
+        : safeQueryAll(sortableWrapper, 'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item');
       if (sortableItems.length >= 2) {
         qtype = 5; // 排序/拖拽题
         unipusLog(activeContext, `u校园检测到排序题（qtype=5），容器: ${sortableWrapper.className || sortableWrapper.tagName}，选项 ${sortableItems.length} 个`);
@@ -1463,11 +1470,28 @@ function buildDomQuestion(container) {
   // 排序/拖拽题 (qtype = 5)
   if (qtype === 5) {
     const sortableWrapper = safeQuery(container, '.sortable-list-wrapper, .sequence-container, .sequence-pc-card, [class*="sortable"], [class*="sequence"]');
-    const sortableItems = sortableWrapper ? safeQueryAll(sortableWrapper, 'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item') : [];
+    // v87：与检测分支一致，直接子 DIV 优先（配对页数字行+句子行）。
+    const directDivs = sortableWrapper ? Array.from(sortableWrapper.children || [])
+      .filter((child) => child && child.tagName === 'DIV') : [];
+    const sortableItems = (sortableWrapper && directDivs.length >= 2) ? directDivs
+      : (sortableWrapper ? safeQueryAll(sortableWrapper, 'li, [draggable], .sortable-item, .sequence-item, .sequence-pc-card--item') : []);
+    // v87：从 DOM 提取句子选项（配对页：数字行(短/纯数字) + 句子行(长文本) 交替），
+    // 顺序即选项原始顺序（A/B/C/…）——v86 的字幕求解需要 options[].text/name。
+    const domOptions = [];
+    const sentenceItems = (sortableItems || []).filter((item) => {
+      const text = asString(item.textContent).replace(/\s+/g, ' ').trim();
+      return text.length > 15 && !/^\d+$/.test(text);
+    });
+    sentenceItems.forEach((item, index) => {
+      domOptions.push({
+        name: String.fromCharCode(65 + index),
+        text: asString(item.textContent).replace(/\s+/g, ' ').trim(),
+      });
+    });
     return {
       qtype: 5,
       stem: stemHtml,
-      options: [],
+      options: domOptions,
       sortableWrapper,
       sortableItems,
       isAnswered: () => false, // 排序题暂不支持已答检测
