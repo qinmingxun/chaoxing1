@@ -63,6 +63,10 @@ const MAIN_CONFIRM_EVENT = "course-helper:main:set-confirm";
 // 语音题停止兜底：MAIN world 对存活 MediaRecorder 直接 stop（React 重渲染替换
 // 节点导致停止按钮点击无效时使用；见 unipus-voice 分区 tryStopRecording 策略 3）。
 const MAIN_STOP_RECORDING_EVENT = "course-helper:main:ucampus-stop-recording";
+// v90：排序题跨世界落地（isolated world 看不到主世界 fiber expando，落地必须在主世界执行）。
+const MAIN_SORT_LAND_EVENT = "course-helper:main:ucampus-sort-land";
+const MAIN_SORT_LAND_RESULT_EVENT = "course-helper:main:ucampus-sort-land-result";
+let sortLandWaiters = Object.create(null); // requestId -> resolve
 // 录音状态回执事件（MAIN → content）：{recording, recorderCount, stopRequested}。
 const MAIN_RECORDING_STATE_EVENT = "course-helper:main:ucampus-recording-state";
 
@@ -1672,8 +1676,46 @@ function onQuestionMessage(event) {
   if (!event) return;
   const data = event.data;
   if (!data || data.source !== MAIN_SOURCE) return; // 必须携带 source:"course-helper"
+  // v90：排序题跨世界落地结果（requestId 关联等待者）。
+  if (data.type === MAIN_SORT_LAND_RESULT_EVENT) {
+    const rid = asString(data.requestId);
+    const waiter = sortLandWaiters[rid];
+    if (waiter) {
+      delete sortLandWaiters[rid];
+      try { waiter(asObject(data.payload) || {}); } catch (_e) { /* 忽略 */ }
+    }
+    return;
+  }
   if (data.type !== MAIN_QUESTION_DATA_EVENT) return;
   handleQuestionDataPayload(asObject(data.payload));
+}
+
+// v90：请求-响应式跨世界落地。返回 Promise<result>（8s 超时兜底）。
+let sortLandRequestSeq = 0;
+function requestSortLandViaBridge(context, order) {
+  const view = getContextWindow(context || activeContext);
+  if (!view || typeof view.postMessage !== "function") {
+    return Promise.resolve({ ok: false, reason: "no-window" });
+  }
+  sortLandRequestSeq += 1;
+  const requestId = "sort-land-" + Date.now() + "-" + sortLandRequestSeq;
+  return new Promise((resolve) => {
+    sortLandWaiters[requestId] = resolve;
+    try {
+      view.postMessage({ source: MAIN_SOURCE, type: MAIN_SORT_LAND_EVENT, requestId, payload: { order } }, "*");
+    } catch (_e) {
+      delete sortLandWaiters[requestId];
+      resolve({ ok: false, reason: "post-failed" });
+      return;
+    }
+    setTimeout(() => {
+      const waiter = sortLandWaiters[requestId];
+      if (waiter) {
+        delete sortLandWaiters[requestId];
+        waiter({ ok: false, reason: "timeout" });
+      }
+    }, 8000);
+  });
 }
 
 // ==== END SECTION: unipus-interceptor ====
@@ -2245,19 +2287,17 @@ function tryLandPendingSortable(context) {
   if (!wrapper || !(wrapper.children && wrapper.children.length >= 2)) return false;
   const pending = pendingSortableLanding;
   pendingSortableLanding = null; // 先取走防重入
-  const fill = pending.fill;
-  if (typeof fill !== 'function') return false;
-  Promise.resolve()
-    .then(() => fill(pending.order))
+  // v90：落地必须在主世界执行（isolated world 看不到 __reactFiber$ expando）。
+  // 请求-响应式跨世界调用；失败时还原 pending 供重试。
+  requestSortLandViaBridge(context || activeContext, pending.order)
     .then((result) => {
-      if (result && result.filled) {
+      if (result && result.ok) {
         unipusLog((context || activeContext),
-          `u校园排序题（observer）：配对 UI 已渲染，落地成功（顺序 ${pending.order}，onSortEnd 重排完成）。`);
+          `u校园排序题（跨世界落地）：成功（移动 ${result.moved} 次，${result.count} 句重排完成）。`);
         scheduleAutoSubmitForLanded(context || activeContext);
       } else {
         unipusWarn((context || activeContext),
-          `u校园排序题（observer）：落地未成功（${result && result.reason}），稍后由重试兜底。`);
-        // 落地未成功：还原 pending 让下一轮再试
+          `u校园排序题（跨世界落地）：未成功（${result && result.reason}），稍后由重试兜底。`);
         if (!pendingSortableLanding) pendingSortableLanding = pending;
       }
     })
@@ -2369,23 +2409,31 @@ function resolveSortableOrder(answer, optionTexts) {
           question.sortableItems = sortableItems;
           // 2026-10-25：挂 React 直调填答（quiz-solver 的 callFillQuestionAnswer 会优先用
           // question.fillAnswer）。答案需能解析成“句子顺序”，支持 A-F 字母 / 下标 / 句子文本。
+          // v90：fillAnswer 改为跨世界落地——isolated world 看不到主世界的
+          // __reactFiber$ expando，本地 applySortableOrderViaReact 永远 no-react-fiber。
+          // 答案（A-F 字母或句子序列）直接交给主世界 bridge 执行 fiber onSortEnd。
           question.fillAnswer = async (answer) => {
-            const liveDoc = getContextDocument(context);
-            if (!liveDoc) return { filled: false, skipped: false, reason: "no-document" };
             const questionOptions = Array.isArray(question.options) ? question.options : [];
             const desired = resolveSortableOrder(answer, questionOptions);
-            if (!desired) {
-              return { filled: false, skipped: true, reason: "unparsable-sortable-answer" };
+            if (desired) {
+              // 字母/下标可解析 → 转回字母序列发给主世界
+              const letters = desired.map((index) => String.fromCharCode(65 + index)).join('#');
+              const result = await requestSortLandViaBridge(context, letters);
+              if (result && result.ok) {
+                unipusLog(context,
+                  `u校园配对/排序题：跨世界落地成功（移动 ${result.moved} 次）。`);
+                return { filled: true, skipped: false, moved: result.moved };
+              }
+              return { filled: false, skipped: true, reason: (result && result.reason) || 'bridge-land-failed' };
             }
-            const result = applySortableOrderViaReact(liveDoc, desired);
-            if (result.ok) {
+            // 不可解析为字母/下标 → 按原文（句子序列）发主世界按文本匹配
+            const result = await requestSortLandViaBridge(context, asString(answer));
+            if (result && result.ok) {
               unipusLog(context,
-                `u校园配对/排序题：已通过 React onSortEnd 重排句子（移动 ${result.moved} 次）。`);
+                `u校园配对/排序题：跨世界落地成功（文本匹配，移动 ${result.moved} 次）。`);
               return { filled: true, skipped: false, moved: result.moved };
             }
-            unipusWarn(context,
-              `u校园配对/排序题：React 直调失败（${result.reason}），本题跳过（可手动完成）。`);
-            return { filled: false, skipped: true, reason: result.reason };
+            return { filled: false, skipped: true, reason: (result && result.reason) || 'bridge-land-failed' };
           };
           attached += 1;
         });

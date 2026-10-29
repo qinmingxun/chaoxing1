@@ -40,6 +40,7 @@
     'course-helper:main:set-mobile-editor',
     'course-helper:main:set-ucampus-answer-queue',
     'course-helper:main:ucampus-stop-recording',
+    'course-helper:main:ucampus-sort-land',
     'course-helper:main:dispose'
   ];
   var OUTPUT_EVENTS = {
@@ -48,6 +49,7 @@
     QUESTION_DATA: 'course-helper:main:ucampus-question-data',
     SUBMIT: 'course-helper:main:ucampus-submit',
     RECORDING_STATE: 'course-helper:main:ucampus-recording-state',
+    SORT_LAND_RESULT: 'course-helper:main:ucampus-sort-land-result',
     ERROR: 'course-helper:main:error'
   };
   var hasOwn = Object.prototype.hasOwnProperty;
@@ -1159,6 +1161,119 @@
     }
   }
 
+  // ---- v90（2026-10-27）：排序/配对题跨世界落地 ----
+  // 背景：isolated world 的 DOM wrapper 上看不到主世界挂的 __reactFiber$ expando
+  // （Chrome 每个世界有独立 DOM wrapper），adapter 侧 onSortEnd 直调永远 no-react-fiber。
+  // 正解：落地请求发到主世界（本文件运行处），由主世界查 fiber 并调用 onSortEnd。
+  // payload: { order: 'B#A#D#F#C#E' }（字母或句子文本，# 分隔）。
+  function findSortableFiberInMain() {
+    var wrapper = globalWindow.document.querySelector('#sortableListWrapper') ||
+      globalWindow.document.querySelector('.sortable-list-wrapper');
+    if (!wrapper) return { ok: false, reason: 'no-wrapper' };
+    var keys = Object.keys(wrapper);
+    var fiberKey = null;
+    for (var i = 0; i < keys.length; i += 1) {
+      if (keys[i].indexOf('__reactFiber$') === 0 || keys[i].indexOf('__reactInternalInstance$') === 0) {
+        fiberKey = keys[i];
+        break;
+      }
+    }
+    if (!fiberKey) return { ok: false, reason: 'no-react-fiber' };
+    var node = wrapper[fiberKey];
+    var guard = 0;
+    while (node && guard < 40) {
+      guard += 1;
+      if (node.memoizedProps && typeof node.memoizedProps.onSortEnd === 'function') {
+        return { ok: true, onSortEnd: node.memoizedProps.onSortEnd };
+      }
+      node = node.return;
+    }
+    return { ok: false, reason: 'onSortEnd-not-found' };
+  }
+
+  function normalizeSortableText(value) {
+    return String(value == null ? '' : value).toLowerCase()
+      .replace(/<[^>]*>/g, '')
+      .replace(/&[a-z]+;/gi, ' ')
+      .replace(/[^a-z0-9 ]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function handleSortLand(payload, requestId) {
+    if (!isObject(payload) || typeof payload.order !== 'string' || !payload.order) {
+      reportError('INVALID_SORT_LAND', 'ucampus-sort-land payload 无效', requestId);
+      return;
+    }
+    try {
+      var found = findSortableFiberInMain();
+      if (!found.ok) {
+        emit(OUTPUT_EVENTS.SORT_LAND_RESULT, { ok: false, reason: found.reason }, requestId);
+        return;
+      }
+      var wrapper = globalWindow.document.querySelector('#sortableListWrapper') ||
+        globalWindow.document.querySelector('.sortable-list-wrapper');
+      // 句子行：直接子 DIV 中文本较长的（数字行/图片行短或纯数字）。
+      var sentenceDivs = Array.prototype.filter.call(wrapper.children, function (child) {
+        var text = String(child.textContent || '').replace(/\s+/g, ' ').trim();
+        return text.length > 15 && !/^\d+$/.test(text);
+      });
+      if (sentenceDivs.length < 2) {
+        emit(OUTPUT_EVENTS.SORT_LAND_RESULT, { ok: false, reason: 'no-sentence-divs' }, requestId);
+        return;
+      }
+      var orderParts = payload.order.split('#').map(function (part) { return part.trim(); }).filter(Boolean);
+      if (orderParts.length !== sentenceDivs.length) {
+        emit(OUTPUT_EVENTS.SORT_LAND_RESULT, { ok: false, reason: 'order-length-mismatch', expected: sentenceDivs.length, got: orderParts.length }, requestId);
+        return;
+      }
+      // 期望顺序 → 每个槽位放哪个原始句子下标。
+      var desired = [];
+      for (var slot = 0; slot < orderParts.length; slot += 1) {
+        var token = orderParts[slot];
+        var matched = -1;
+        if (/^[A-Za-z]$/.test(token)) {
+          matched = token.toUpperCase().charCodeAt(0) - 65;
+        }
+        if (matched < 0 || matched >= sentenceDivs.length) {
+          // 按文本匹配（token 是句子或句子片段）。
+          var norm = normalizeSortableText(token);
+          var head = norm.slice(0, 40);
+          for (var s = 0; s < sentenceDivs.length; s += 1) {
+            var divText = normalizeSortableText(sentenceDivs[s].textContent);
+            if ((head && divText.indexOf(head) !== -1) || divText.indexOf(norm) !== -1) {
+              matched = s;
+              break;
+            }
+          }
+        }
+        if (matched < 0 || desired.indexOf(matched) !== -1) {
+          emit(OUTPUT_EVENTS.SORT_LAND_RESULT, { ok: false, reason: 'order-token-unmatched', token: token.slice(0, 40) }, requestId);
+          return;
+        }
+        desired.push(matched);
+      }
+      // 选择排序逐位换到位（与原 isolated 实现一致的语义）。
+      var current = [];
+      for (var c = 0; c < desired.length; c += 1) current.push(c);
+      var moved = 0;
+      for (var pos = 0; pos < desired.length; pos += 1) {
+        var want = desired[pos];
+        var from = current.indexOf(want);
+        if (from < 0 || from === pos) continue;
+        try {
+          found.onSortEnd({ oldIndex: from, newIndex: pos, collection: 0 });
+        } catch (sortCallError) { /* 单步失败继续 */ }
+        var removed = current.splice(from, 1);
+        current.splice(pos, 0, removed[0]);
+        moved += 1;
+      }
+      emit(OUTPUT_EVENTS.SORT_LAND_RESULT, { ok: true, moved: moved, count: desired.length }, requestId);
+    } catch (sortLandError) {
+      emit(OUTPUT_EVENTS.SORT_LAND_RESULT, { ok: false, reason: safeErrorMessage(sortLandError, 'sort-land 失败') }, requestId);
+    }
+  }
+
   function setAnswerQueue(payload, requestId) {
     if (!isObject(payload) || !Array.isArray(payload.answers)) {
       reportError('INVALID_ANSWER_QUEUE', 'set-ucampus-answer-queue payload 无效', requestId);
@@ -1217,6 +1332,9 @@
           return;
         case 'course-helper:main:ucampus-stop-recording':
           handleStopRecordingCommand(requestId);
+          return;
+        case 'course-helper:main:ucampus-sort-land':
+          handleSortLand(payload, requestId);
           return;
         case 'course-helper:main:dispose':
           if (!isObject(payload) || typeof payload.reason !== 'string') {
