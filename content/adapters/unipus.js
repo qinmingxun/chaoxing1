@@ -805,6 +805,17 @@ function findChoiceBlock(stemElement, container) {
     const radios = safeQueryAll(node,
       "input[type=radio], input[type=checkbox], .option-wrap");
     if (radios.length) return node;
+    // v94（2026-11-01 真机回归发现）：1-8 More practice / 1-3 Listening 等听力选择题
+    // 的选项是 **div.option**（无 input、无 .option-wrap）：
+    //   <div class="option isNotReview"><span>A</span>That she gave many wrong answers…</div>
+    // 旧逻辑只认 input/.option-wrap → findChoiceBlock 返回 null → choiceInputs 为空
+    // → buildDomQuestion 返回 null → 整页无题可答 → 只能靠 60s 空闲兜底推进（实测卡 8 分钟）。
+    // 判据：至少 2 个 .option 且各自有可读文本。
+    try {
+      const optionDivs = Array.prototype.slice.call(node.querySelectorAll ? node.querySelectorAll(".option") : [])
+        .filter((el) => el && asString(el.textContent).replace(/\s+/g, "").length >= 2);
+      if (optionDivs.length >= 2) return node;
+    } catch (_optionProbeError) { /* 忽略 */ }
     try {
       node = node.parentElement || null;
     } catch (_error) {
@@ -831,6 +842,16 @@ function collectOptionItems(block) {
       if (child) items.push(child);
     }
   }
+  if (items.length) return items;
+  // v94（2026-11-01 真机回归发现）：听力选择题的选项是 div.option（无 .option-wrap）。
+  // 结构实测（1-3 Listening / 1-8 More practice）：
+  //   <div class="option isNotReview"><span>A</span>That she gave…</div>
+  // 直接返回这些 .option 元素，按 DOM 顺序 = A/B/C/D。
+  try {
+    const optionDivs = Array.prototype.slice.call(block.querySelectorAll ? block.querySelectorAll(".option") : [])
+      .filter((el) => el && asString(el.textContent).replace(/\s+/g, "").length >= 2);
+    if (optionDivs.length >= 2) return optionDivs;
+  } catch (_optionDivError) { /* 忽略 */ }
   return items;
 }
 
@@ -1361,11 +1382,15 @@ function readDomOptions(container, choiceInputs) {
     if (texts.length) return texts;
   }
   // 兜底：无 radio/checkbox 时按选项列表候选处理（可点击 div/li 选项，需在真实页面核对）
+  // v94（2026-11-01）：改为「首个命中即返回」，避免多个选择器（如 .option 与 .option-list li）
+  // 同时命中导致选项重复、顺序错乱。优先取元素数 >= 2 的选择器。
   for (const selector of DOM_OPTION_SELECTOR_CANDIDATES) {
+    const collected = [];
     for (const node of safeQueryAll(container, selector)) {
       const text = stripTagsHtml(asString(node.innerHTML));
-      if (text && texts.indexOf(text) === -1) texts.push(text);
+      if (text && collected.indexOf(text) === -1) collected.push(text);
     }
+    if (collected.length >= 2) return collected;
   }
   return texts;
 }
@@ -1454,7 +1479,25 @@ function buildDomQuestion(container) {
     } else if (textInputs.length) {
       qtype = 2;
     } else {
-      return null;
+      // v94（2026-11-01 真机回归发现）：div.option 型选择题（无 input）——
+      // 1-3 Listening / 1-8 More practice 等听力选择题实测结构。
+      // 旧逻辑在此直接 return null → 整页无题可答 → 卡到 60s 兜底。
+      try {
+        const optionDivs = safeQueryAll(container, ".option").filter(
+          (el) => el && asString(el.textContent).replace(/\s+/g, "").length >= 2
+        );
+        if (optionDivs.length >= 2) {
+          // 两个选项且文本像"对/错"→ 判断题；否则单选
+          const texts = optionDivs.map((el) => asString(el.textContent).replace(/\s+/g, " ").trim());
+          qtype = isTrueFalseOptionTexts(texts) ? 3 : 0;
+          unipusLog(activeContext,
+            `u校园检测到 div.option 型选择题（qtype=${qtype}，选项 ${optionDivs.length} 个）。`);
+        } else {
+          return null;
+        }
+      } catch (_optionInferError) {
+        return null;
+      }
     }
   }
 
