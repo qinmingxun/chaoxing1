@@ -4401,6 +4401,68 @@ function resetAutoContinueState() {
 // 提交后无"继续学习/下一题"可点 → 自动流程停滞。此时改点【左侧微课菜单的下一个条目】。
 // 结构（实测）：左侧 [data-role="micro"]（class pc-slider-menu-micro），
 // 当前激活项 class 含 pc-menu-activity；下一项即要进入的节。
+// v95（2026-11-01 全链路回归发现）：运行时建立的「hash 前缀/leaf → 目录项下标」映射。
+// 背景：某些页（实测 1-1 Learning objectives）目录里**没有任何激活标记**
+//   （全部 pc-menu-default；React props 的 currentId / microId 也拿不到本节 id），
+//   导致 findNextTocItem 判定"找不到当前项" → 看门狗"情况 B：点目录下一节"无从下手
+//   → 该页永久卡死（实测卡 4+ 分钟）。
+// 解决：扩展自己在点击目录项时记录「该项对应哪个 hash 前缀 / leaf」，
+//   之后用当前 hash 反查当前项下标。
+const unipusTocPrefixMap = Object.create(null);   // prefix → 目录项下标
+const unipusTocLeafMap = Object.create(null);      // leaf → 目录项下标
+
+function unipusCoursewareSegmentsFromHash(hash) {
+  const text = asString(hash);
+  const courseware = (text.match(/\/courseware\/([^/]+(?:\/[^/]+)*)/) || [])[1] || "";
+  if (!courseware) return [];
+  return courseware.split("/").filter(Boolean).filter((segment) => segment !== "default");
+}
+
+function unipusCoursewarePrefixFromHash(hash) {
+  const segments = unipusCoursewareSegmentsFromHash(hash);
+  return segments.length >= 2 ? segments.slice(0, -1).join("/") : "";
+}
+
+function unipusLeafFromHash(hash) {
+  const segments = unipusCoursewareSegmentsFromHash(hash);
+  return segments.length ? segments[segments.length - 1] : "";
+}
+
+// 点击目录项后调用：记录该项对应的 hash 前缀/leaf，供之后反查当前项。
+function rememberTocItemRoute(index, hash) {
+  if (typeof index !== "number" || index < 0) return;
+  const prefix = unipusCoursewarePrefixFromHash(hash);
+  const leaf = unipusLeafFromHash(hash);
+  if (prefix) unipusTocPrefixMap[prefix] = index;
+  if (leaf) unipusTocLeafMap[leaf] = index;
+}
+
+// v95：点击目录项后平台会跳到新 hash —— 在点击处打标记，
+// 由 pollTocRouteAfterClick 在 hash 变化时把「新 hash 前缀 → 被点击项下标」写入映射。
+let unipusTocClickIndex = -1;
+let unipusTocClickHash = "";
+
+function markTocClick(index) {
+  if (typeof index !== "number" || index < 0) return;
+  unipusTocClickIndex = index;
+  unipusTocClickHash = "";
+}
+
+// 在看门狗巡检里调用：若标记的点击已导致 hash 变化 → 记录映射。
+function pollTocRouteAfterClick(doc) {
+  if (unipusTocClickIndex < 0) return;
+  try {
+    const view = doc && doc.defaultView ? doc.defaultView : (typeof window !== "undefined" ? window : null);
+    const hash = asString(view && view.location ? view.location.hash : "");
+    if (!hash) return;
+    if (!unipusTocClickHash) { unipusTocClickHash = hash; return; }
+    if (hash === unipusTocClickHash) return;
+    rememberTocItemRoute(unipusTocClickIndex, hash);
+    unipusTocClickIndex = -1;
+    unipusTocClickHash = "";
+  } catch (_pollError) { /* 忽略 */ }
+}
+
 function findNextTocItem(doc) {
   if (!doc || typeof doc.querySelectorAll !== "function") return null;
   const items = safeQueryAll(doc, '[data-role="micro"]');
@@ -4409,10 +4471,70 @@ function findNextTocItem(doc) {
   for (let i = 0; i < items.length; i += 1) {
     if (/pc-menu-activity/.test(asString(items[i].className))) { activeIndex = i; break; }
   }
+  // v95：即使有 pc-menu-activity 标记，也顺手记录一次映射（供后续无标记页复用）。
+  if (activeIndex >= 0) {
+    try {
+      const view = doc.defaultView || (typeof window !== "undefined" ? window : null);
+      rememberTocItemRoute(activeIndex, asString(view && view.location ? view.location.hash : ""));
+    } catch (_rememberActiveError) { /* 忽略 */ }
+  }
+  // v95：无激活标记时用 hash 前缀/leaf 反查当前项。
+  if (activeIndex < 0) {
+    activeIndex = findActiveTocIndexByHash(doc, items);
+    // 反查成功 → 顺手把「当前 hash 前缀/leaf → 该下标」记入运行时映射，
+    // 这样后续同节内的其它子节（hash 不同但前缀相同）也能直接命中。
+    if (activeIndex >= 0) {
+      try {
+        const view = doc.defaultView || (typeof window !== "undefined" ? window : null);
+        rememberTocItemRoute(activeIndex, asString(view && view.location ? view.location.hash : ""));
+      } catch (_rememberError) { /* 忽略 */ }
+    }
+  }
   if (activeIndex < 0 || activeIndex + 1 >= items.length) return null;
-  const next = items[activeIndex + 1];
+  const nextIndex = activeIndex + 1;
+  const next = items[nextIndex];
   if (!next || !isElementVisible(next)) return null;
+  // v95：标记被点击项下标，hash 变化后据此建立映射。
+  markTocClick(nextIndex);
   return next;
+}
+
+// 用当前 location.hash 反查目录中的当前项下标。
+// 优先级：① 运行时映射表（点击时记录，最准）② 文本编号匹配（兜底）。
+function findActiveTocIndexByHash(doc, items) {
+  try {
+    const view = doc.defaultView || (typeof window !== "undefined" ? window : null);
+    const hash = asString(view && view.location ? view.location.hash : "");
+    if (!hash) return -1;
+
+    // ① 运行时映射（扩展点击目录项时记录）
+    const prefix = unipusCoursewarePrefixFromHash(hash);
+    if (prefix && unipusTocPrefixMap[prefix] !== undefined) {
+      const mapped = unipusTocPrefixMap[prefix];
+      if (mapped >= 0 && mapped < items.length) return mapped;
+    }
+    const leaf = unipusLeafFromHash(hash);
+    if (leaf && unipusTocLeafMap[leaf] !== undefined) {
+      const mapped = unipusTocLeafMap[leaf];
+      if (mapped >= 0 && mapped < items.length) return mapped;
+    }
+
+    // ② 兜底：目录文本编号与 hash 末段数字匹配（要求父节点编号一致）
+    const segments = unipusCoursewareSegmentsFromHash(hash);
+    if (segments.length < 2) return -1;
+    const digits = (segments[segments.length - 1].match(/(\d+)$/) || [])[1];
+    const parentDigits = (segments[segments.length - 2].match(/(\d+)$/) || [])[1] || "";
+    if (!digits || !parentDigits) return -1;
+    const wantPrefix = parentDigits + "-";
+    for (let i = 0; i < items.length; i += 1) {
+      const text = asString(items[i].textContent).replace(/\s+/g, " ").trim();
+      const match = text.match(new RegExp("^" + wantPrefix + "(\\d+)"));
+      if (match && match[1] === digits) return i;
+    }
+    return -1;
+  } catch (_hashLookupError) {
+    return -1;
+  }
 }
 
 // 在页脚候选（用户实测 selector）中按文本/伪元素文本查找链接。
@@ -4699,6 +4821,8 @@ function startUnipusIdleWatcher(context) {
       // 面板自愈：平台 SPA 重渲染会清掉 body 子节点，导致面板与日志消失。
       // buildUnipusUi 幂等（已存在直接返回），这里定期确保它还在。
       try { buildUnipusUi(); } catch (_uiRebuildError) { /* 忽略 */ }
+      // v95：检测目录点击导致的 hash 变化 → 建立「hash 前缀 → 目录项下标」映射。
+      try { pollTocRouteAfterClick(doc); } catch (_tocRouteError) { /* 忽略 */ }
       // 全局"停止刷课"时看门狗完全不动页面（仅保持巡检）。
       if (unipusSweepEnabled !== true) return;
       const hash = unipusPageSignature(context);
