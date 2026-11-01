@@ -2271,6 +2271,176 @@ async function solveSortableFromLocalSubtitles(context, question) {
   }
 }
 
+// ---- v92（2026-11-01）：qtype=2 填空题的本地字幕求解（零 token）----
+// 原理（真实数据实测 u1g7）：填空题题干本身就是**字幕的挖空版**——
+//   "I like learning 1)____1____ in my spare time. 2)____2____, I'm studying Spanish. ..."
+//   字幕："I have a full-time job but I like learning new things in my spare time."
+//          "At the moment, I'm studying Spanish."
+// 解法：①题干按 ____N____ 切成「非空段 / 空位」交替；
+//      ②字幕 cue 拼成连续词序列（跨 cue 连续，避免断句影响）；
+//      ③每个非空段按出现顺序在字幕中定位（顺序推进，防重复匹配）；
+//      ④空位答案 = 前后两段之间的字幕词（跳过标点/大小写差异）。
+// 只在**每个空都定位成功**时返回答案；任何一段匹配不上 → 返回 null（回退 DeepSeek，不瞎猜）。
+const FILLBLANK_MARKER_RE = /(\d+)\)\s*_+(\d+)_+/g;
+
+function parseVttCuesRobust(vttRaw) {
+  const text = asString(vttRaw).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const cues = [];
+  for (const block of text.split(/\n{2,}/)) {
+    const keep = [];
+    for (const rawLine of block.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (/^WEBVTT/i.test(line)) continue;
+      if (line.indexOf("-->") !== -1) continue;
+      if (/^\d+$/.test(line)) continue;
+      keep.push(line);
+    }
+    const cue = keep.join(" ").trim();
+    if (cue) cues.push(cue);
+  }
+  return cues;
+}
+
+// 从填空题题干里取「非空段数组 + 空位编号数组」。
+function splitFillblankStem(stemHtml) {
+  const stem = asString(stemHtml)
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stem) return null;
+  FILLBLANK_MARKER_RE.lastIndex = 0;
+  const segments = [];
+  const blanks = [];
+  let last = 0;
+  let match;
+  while ((match = FILLBLANK_MARKER_RE.exec(stem)) !== null) {
+    segments.push(normalizeVttText(stem.slice(last, match.index)));
+    blanks.push(match[2]);
+    last = match.index + match[0].length;
+  }
+  segments.push(normalizeVttText(stem.slice(last)));
+  if (!blanks.length) return null;
+  return { segments, blanks };
+}
+
+// 用字幕求解填空题：返回 "ans1#ans2#..." 或 null。
+function solveFillblankFromCues(segments, blanks, cueTexts) {
+  if (!segments || !blanks || !cueTexts || !cueTexts.length) return null;
+  const words = [];
+  for (const cue of cueTexts) {
+    for (const word of normalizeVttText(cue).split(" ")) {
+      if (word) words.push(word);
+    }
+  }
+  if (!words.length) return null;
+
+  // 每个非空段在字幕词序列中定位（顺序推进；失败再全文回退）。
+  const positions = [];
+  let cursor = 0;
+  for (const segment of segments) {
+    if (!segment) { positions.push(null); continue; }
+    const segWords = segment.split(" ").filter(Boolean);
+    if (!segWords.length) { positions.push(null); continue; }
+    let found = -1;
+    for (let start = cursor; start + segWords.length <= words.length; start += 1) {
+      let hit = true;
+      for (let k = 0; k < segWords.length; k += 1) {
+        if (words[start + k] !== segWords[k]) { hit = false; break; }
+      }
+      if (hit) { found = start; break; }
+    }
+    if (found < 0) {
+      for (let start = 0; start + segWords.length <= words.length; start += 1) {
+        let hit = true;
+        for (let k = 0; k < segWords.length; k += 1) {
+          if (words[start + k] !== segWords[k]) { hit = false; break; }
+        }
+        if (hit) { found = start; break; }
+      }
+    }
+    if (found < 0) { positions.push(null); continue; }
+    positions.push({ start: found, end: found + segWords.length });
+    cursor = found + segWords.length;
+  }
+
+  const answers = [];
+  for (let index = 0; index < blanks.length; index += 1) {
+    const left = positions[index];
+    const right = positions[index + 1];
+    if (!left || !right || right.start < left.end) return null; // 有空位定位不了 → 不猜
+    const gap = words.slice(left.end, right.start);
+    if (!gap.length) return null;
+    answers.push(gap.join(" "));
+  }
+  return answers.length === blanks.length ? answers.join("#") : null;
+}
+
+// 从本页拦截题包取所有 VTT 直链（复用配对题同一来源：题包解密原文 + DOM track 兜底）。
+async function collectLocalVttCandidates(context) {
+  const doc = getContextDocument(context);
+  const candidates = [];
+  const seen = Object.create(null);
+  const push = (url) => {
+    const value = asString(url);
+    if (!/\.vtt(\?|$)/i.test(value) || seen[value]) return;
+    seen[value] = true;
+    candidates.push(value);
+  };
+  for (const item of interceptedQuestions) {
+    let plain = item && item.__decryptedPlain;
+    if (!plain && item && item.content && item.k) {
+      try {
+        const decrypted = await decryptUnipusHexContent(item.content, item.k);
+        if (decrypted) { item.__decryptedPlain = decrypted; plain = decrypted; }
+      } catch (_decryptError) { /* 跳过 */ }
+    }
+    if (!plain) continue;
+    for (const url of plain.match(/https?:\/\/[^"'\\ ]+\.vtt/g) || []) push(url);
+  }
+  try {
+    for (const track of safeQueryAll(doc, 'video track[src], audio track[src]')) {
+      push(track.getAttribute("src"));
+    }
+  } catch (_domError) { /* 忽略 */ }
+  return candidates;
+}
+
+// 对一页里的填空题批量做字幕求解：返回 { 题目下标: "ans1#ans2" }。
+async function solveFillblanksFromLocalSubtitles(context, questions) {
+  const targets = [];
+  (questions || []).forEach((question, index) => {
+    if (!question || question.qtype !== 2) return;
+    const parsed = splitFillblankStem(question.stem);
+    if (!parsed) return;
+    targets.push({ index, parsed });
+  });
+  if (!targets.length) return null;
+  const vttCandidates = await collectLocalVttCandidates(context);
+  if (!vttCandidates.length) return null;
+
+  const solved = Object.create(null);
+  for (const vttUrl of vttCandidates) {
+    let cueTexts = [];
+    try {
+      const response = await fetch(vttUrl, { credentials: "omit" });
+      if (!response || !response.ok) continue;
+      cueTexts = parseVttCuesRobust(await response.text());
+    } catch (_fetchError) { continue; }
+    if (!cueTexts.length) continue;
+    for (const target of targets) {
+      if (solved[target.index] !== undefined) continue;
+      const answer = solveFillblankFromCues(target.parsed.segments, target.parsed.blanks, cueTexts);
+      if (answer) solved[target.index] = answer;
+    }
+    if (targets.every((target) => solved[target.index] !== undefined)) break;
+  }
+  const count = Object.keys(solved).length;
+  return count ? { answers: solved, count, total: targets.length } : null;
+}
+
 // ---- v89（2026-10-27）：排序题落地的事件驱动机制 ----
 // 真机实测：配对 UI（.sortable-list-wrapper）在视频/语音子流程完成后才渲染，
 // v88 的定时重试（20x3s）窗口内可能始终不出现（u2g531：7 道语音做完直接翻页）。
@@ -2556,15 +2726,43 @@ function resolveSortableOrder(answer, optionTexts) {
       }).join(" | "));
   } catch (_error) { /* 诊断日志失败不影响流程 */ }
 
-  let summary = null;
+  // v92（2026-11-01）：填空题优先用本地字幕求解（零 token、准确率高）——
+  // 题干本身是字幕的挖空版，对齐后答案即字幕原词；只有字幕解不出的题才走 DeepSeek。
+  let fillblankFromVtt = null;
   try {
-    // 并发 3 求解（quiz-solver 仅在该选项显式传入时并发，学习通等平台不受影响）：
-    // DeepSeek 答案质量与并发无关，只缩短多题一页的墙钟时间。
-    summary = await solver.solveQuestions(solvableQuestions, solverContext,
-      { autoSubmit: false, concurrency: 3 });
-  } catch (_error) {
-    unipusWarn(context, "solveQuestions 调用失败，跳过答案注入接线。");
-    return { started: false, reason: "solve-failed" };
+    fillblankFromVtt = await solveFillblanksFromLocalSubtitles(context, questions);
+    if (fillblankFromVtt) {
+      unipusLog(context,
+        `u校园填空题：本地字幕求解成功 ${fillblankFromVtt.count}/${fillblankFromVtt.total} 道（零 token）。`);
+    }
+  } catch (_fillblankVttError) { /* 字幕求解失败不阻塞，回退 DeepSeek */ }
+
+  // 已由字幕解出的填空题：从 DeepSeek 求解列表中剔除（省 token、且避免模型给出错答）。
+  const vttSolvedIndexes = Object.create(null);
+  if (fillblankFromVtt && fillblankFromVtt.answers) {
+    for (const key of Object.keys(fillblankFromVtt.answers)) vttSolvedIndexes[Number(key)] = true;
+  }
+  const deepSeekIndexes = [];
+  const deepSeekQuestions = [];
+  solvableIndexes.forEach((originalIndex, position) => {
+    if (vttSolvedIndexes[originalIndex]) return;
+    deepSeekIndexes.push(originalIndex);
+    deepSeekQuestions.push(solvableQuestions[position]);
+  });
+
+  let summary = null;
+  if (deepSeekQuestions.length) {
+    try {
+      // 并发 3 求解（quiz-solver 仅在该选项显式传入时并发，学习通等平台不受影响）：
+      // DeepSeek 答案质量与并发无关，只缩短多题一页的墙钟时间。
+      summary = await solver.solveQuestions(deepSeekQuestions, solverContext,
+        { autoSubmit: false, concurrency: 3 });
+    } catch (_error) {
+      unipusWarn(context, "solveQuestions 调用失败，跳过答案注入接线。");
+      return { started: false, reason: "solve-failed" };
+    }
+  } else {
+    summary = { results: [] };
   }
 
   // generation 守卫：求解期间若已发生提交成功（缓存已清空、进入下一轮），
@@ -2580,7 +2778,7 @@ function resolveSortableOrder(answer, optionTexts) {
   // 语音题占位空字符串（不计 missing）：提交注入时该题值叶子填入空。
   const results = asObject(summary) && Array.isArray(summary.results) ? summary.results : [];
   const solvablePositionByIndex = Object.create(null);
-  solvableIndexes.forEach((originalIndex, position) => {
+  deepSeekIndexes.forEach((originalIndex, position) => {
     solvablePositionByIndex[originalIndex] = position;
   });
   const answers = [];
@@ -2603,10 +2801,15 @@ function resolveSortableOrder(answer, optionTexts) {
     }
     const qtype = question && question.qtype;
     const isTextQuestion = (qtype === 2 || qtype === 4);
+    // v92：填空题优先取本地字幕答案（按题目下标索引，不受 DeepSeek 子集影响）。
+    const vttAnswer = fillblankFromVtt && fillblankFromVtt.answers
+      ? fillblankFromVtt.answers[index] : undefined;
     const solvablePosition = solvablePositionByIndex[index];
     const result = solvablePosition !== undefined && solvablePosition < results.length
       ? results[solvablePosition] : null;
-    const answer = result && typeof result.answer === "string" ? result.answer.trim() : "";
+    const answer = (typeof vttAnswer === "string" && vttAnswer.trim())
+      ? vttAnswer.trim()
+      : (result && typeof result.answer === "string" ? result.answer.trim() : "");
     if (!answer) {
       missing += 1;
       answers.push("");
