@@ -772,6 +772,61 @@ function choiceContainers(doc) {
 
 // 按题干文本定位题块（一页多题时避免跨题点错选项）：先找含题干文本的最深元素，
 // 再向上找最近的含 radio/checkbox 的祖先（题块），找不到题块时回退整容器。
+// v96（2026-11-01 真机回归发现）：一页多道题**题干完全相同**时（如 1-8 More practice
+// 的 5 道听力选择题，题干都是 "Listen to five short conversations and choose the best
+// answer to each question you hear."），按题干文本定位会永远命中第 1 个题块
+// → 后面 4 道题的 optionIndex 全部错位（点到第 1 题的选项）→ 实际只有第 1 题被作答。
+// 修复：按「题序」定位题块（容器内第 N 个含选项的题块）。
+function findChoiceBlockByOrder(container, choiceOrder) {
+  if (!container || typeof container.querySelectorAll !== "function") return null;
+  // 题块候选 = 同时含选项与题干的元素。
+  // 注意：同一题的多个选项可能是**多个** .option-wrap（如离线台判断题的 optWrapA/optWrapB，
+  // 各含 1 个 radio）——它们属于同一道题，不能各自算一个题块。
+  // 因此：把每个选项的最近祖先（含该题全部选项）归组，同组只算一个题块。
+  const optionEls = safeQueryAll(container, ".option-wrap, .option");
+  if (!optionEls.length) return null;
+  // 1) 收集所有候选祖先，并统计每个祖先包含多少个选项元素
+  const ancestors = [];
+  const ancestorOptionCount = [];
+  for (const optionEl of optionEls) {
+    let node = optionEl.parentElement;
+    let guard = 0;
+    while (node && node !== container && guard < 8) {
+      guard += 1;
+      const index = ancestors.indexOf(node);
+      if (index === -1) {
+        ancestors.push(node);
+        ancestorOptionCount.push(1);
+      } else {
+        ancestorOptionCount[index] += 1;
+        break;
+      }
+      node = node.parentElement;
+    }
+  }
+  // 2) 取"包含最多选项"的那些祖先作为题块（同一题的选项都在其中）
+  const maxCount = Math.max.apply(null, ancestorOptionCount.concat([0]));
+  const blocks = [];
+  for (let i = 0; i < ancestors.length; i += 1) {
+    if (ancestorOptionCount[i] === maxCount && blocks.indexOf(ancestors[i]) === -1) {
+      blocks.push(ancestors[i]);
+    }
+  }
+  if (!blocks.length) return null;
+  // 3) 按文档顺序排序，保证与题目顺序一致
+  blocks.sort((a, b) => {
+    if (a === b) return 0;
+    try {
+      const pos = a.compareDocumentPosition(b);
+      if (pos & 4) return -1;   // DOCUMENT_POSITION_FOLLOWING
+      if (pos & 2) return 1;
+    } catch (_sortError) { /* 保持原顺序 */ }
+    return 0;
+  });
+  const index = Math.max(0, Number(choiceOrder) || 0);
+  return index < blocks.length ? blocks[index] : null;
+}
+
 function findStemElement(container, stemText) {
   if (!container || !stemText) return null;
   const normalizedStem = stemText.replace(/\s+/g, "");
@@ -877,12 +932,18 @@ function clickUnipusChoiceOption(question, optionIndex, option) {
   const containers = choiceContainers(doc);
   let radioCount = 0;
   for (const container of containers) {
-    // 题块定位：按题干文本找题块（一页多题的场景），失败回退整容器。
+    // v96：优先按**题序**（页内第几个选择题）定位题块——同题干多题时按题干文本定位会永远命中第 1 题，
+    // 导致后续题目的 optionIndex 错位（实测 1-8 More practice 5 道题全点到第 1 题的选项）。
     let choiceBlock = container;
-    const stemElement = stemText ? findStemElement(container, stemText) : null;
-    if (stemElement) {
-      const block = findChoiceBlock(stemElement, container);
-      if (block) choiceBlock = block;
+    const orderBlock = findChoiceBlockByOrder(container, question && question.__choiceOrder);
+    if (orderBlock) {
+      choiceBlock = orderBlock;
+    } else {
+      const stemElement = stemText ? findStemElement(container, stemText) : null;
+      if (stemElement) {
+        const block = findChoiceBlock(stemElement, container);
+        if (block) choiceBlock = block;
+      }
     }
     // 策略 0（用户实测结构）：div.option-wrap 直接子元素按 DOM 顺序 = 选项。
     const optionItems = collectOptionItems(choiceBlock);
@@ -1311,10 +1372,17 @@ function extractQuestionsFromDom(doc) {
   }
   const questions = [];
   let ignored = 0;
+  let choiceOrderCounter = 0;   // v96：页内选择题序号
   for (const container of uniqueNodes(containers)) {
     const question = buildDomQuestion(container);
-    if (question) questions.push(question);
-    else ignored += 1;
+    if (question) {
+      // v96：记录该题在页内是第几个选择题（供同题干多题按序号定位题块）。
+      if (question.qtype === 0 || question.qtype === 1 || question.qtype === 3) {
+        question.__choiceOrder = choiceOrderCounter;
+        choiceOrderCounter += 1;
+      }
+      questions.push(question);
+    } else ignored += 1;
   }
   if (ignored > 0) {
     unipusWarn(activeContext,
