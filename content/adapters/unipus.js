@@ -2441,6 +2441,118 @@ async function solveFillblanksFromLocalSubtitles(context, questions) {
   return count ? { answers: solved, count, total: targets.length } : null;
 }
 
+// ---- v93（2026-11-01）：填空题的「参考原文」提取 ----
+// 背景：很多听力/视频填空题的题干是原文的**表格化改写**（插入小标题、重排语序），
+// 纯靠题干猜答案准确率低。而题包里常带完整原文（contents[].text 的长文本段）。
+// 做法：把题包内所有长文本段收集起来，作为 referenceText 一并发给 DeepSeek，
+//       让模型以原文为准确定每个空的用词。只对 qtype=2 生效。
+function stripTagsToText(html) {
+  return asString(html)
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&[a-z]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// 从本页拦截题包里提取「参考原文」候选（长文本段，排除题干本身与选项）。
+async function collectReferenceTextsFromPackages(context) {
+  const texts = [];
+  const seen = Object.create(null);
+  const push = (value) => {
+    const text = stripTagsToText(value);
+    if (text.length < 40) return;        // 太短不像原文
+    if (seen[text]) return;
+    seen[text] = true;
+    texts.push(text);
+  };
+  for (const item of interceptedQuestions) {
+    let plain = item && item.__decryptedPlain;
+    if (!plain && item && item.content && item.k) {
+      try {
+        const decrypted = await decryptUnipusHexContent(item.content, item.k);
+        if (decrypted) { item.__decryptedPlain = decrypted; plain = decrypted; }
+      } catch (_decryptError) { /* 跳过 */ }
+    }
+    if (!plain) continue;
+    let parsed = null;
+    try { parsed = JSON.parse(plain); } catch (_parseError) { continue; }
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    for (const entry of items) {
+      let content = null;
+      try { content = JSON.parse(entry && entry.content ? entry.content : "{}"); } catch (_cError) { continue; }
+      const walk = (node) => {
+        if (!node || typeof node !== "object") return;
+        // 原文常见位置：contents[].text（长段英文）；也可能在 contents[].subtitles 之外的字段
+        for (const piece of (Array.isArray(node.contents) ? node.contents : [])) {
+          if (piece && typeof piece.text === "string") push(piece.text);
+        }
+        // 子题也走一遍（题干/选项通常短，会被 40 字门槛过滤）
+        for (const child of (Array.isArray(node.children) ? node.children : [])) walk(child);
+      };
+      walk(content);
+    }
+  }
+  return texts;
+}
+
+// 为某道填空题挑最可能的参考原文。
+// 关键：题干本身也满足"长文本"条件，但它是**挖空版**，重合度天然最高 → 必须排除。
+// 判据：
+//   ① 排除含挖空标记（____N____）的段（那就是题干）
+//   ② 排除与题干文本高度重合的段（>85% 相同）
+//   ③ 在剩余候选里，选与题干实词重合度最高的（归一化，避免长文本占优）
+function pickReferenceTextForQuestion(question, candidates) {
+  if (!Array.isArray(candidates) || !candidates.length) return "";
+  const stem = stripTagsToText(question && question.stem);
+  const stemNorm = stem.toLowerCase().replace(/\s+/g, " ").trim();
+
+  // 过滤掉题干本身 / 挖空版
+  const pool = candidates.filter((text) => {
+    if (/_+\d+_+/.test(text)) return false;                       // 含挖空标记 → 是题干
+    const norm = text.toLowerCase().replace(/\s+/g, " ").trim();
+    if (stemNorm && (norm === stemNorm || norm.indexOf(stemNorm.slice(0, 80)) !== -1 && stemNorm.length > 60)) return false;
+    return true;
+  });
+  if (!pool.length) return "";
+
+  const stemWords = new Set(
+    stem.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(" ").filter((w) => w.length > 2)
+  );
+  if (!stemWords.size) return pool[0];
+  let best = pool[0];
+  let bestScore = -1;
+  for (const text of pool) {
+    const words = text.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(" ").filter(Boolean);
+    let hits = 0;
+    for (const word of words) if (stemWords.has(word)) hits += 1;
+    const score = hits / Math.sqrt(Math.max(1, words.length));
+    if (score > bestScore) { bestScore = score; best = text; }
+  }
+  return best;
+}
+
+// 给一页里的填空题补上 referenceText 字段（供 quiz-solver 透传给 DeepSeek）。
+async function attachReferenceTexts(context, questions) {
+  const targets = (questions || []).filter((q) => q && q.qtype === 2);
+  if (!targets.length) return 0;
+  let candidates = [];
+  try { candidates = await collectReferenceTextsFromPackages(context); } catch (_e) { return 0; }
+  if (!candidates.length) return 0;
+  let attached = 0;
+  for (const question of targets) {
+    const text = pickReferenceTextForQuestion(question, candidates);
+    if (text && text.length >= 40) {
+      question.referenceText = text;
+      attached += 1;
+    }
+  }
+  return attached;
+}
+
 // ---- v89（2026-10-27）：排序题落地的事件驱动机制 ----
 // 真机实测：配对 UI（.sortable-list-wrapper）在视频/语音子流程完成后才渲染，
 // v88 的定时重试（20x3s）窗口内可能始终不出现（u2g531：7 道语音做完直接翻页）。
@@ -2725,6 +2837,18 @@ function resolveSortableOrder(answer, optionTexts) {
         return `#${index + 1} qtype=${qtype}${voice ? "(语音)" : ""} stem="${stem}"`;
       }).join(" | "));
   } catch (_error) { /* 诊断日志失败不影响流程 */ }
+
+  // v93（2026-11-01）：填空题附带「参考原文」给 DeepSeek（提升表格化改写题的准确率）。
+  try {
+    const fillblankCount = questions.filter((q) => q && q.qtype === 2).length;
+    const attachedRefs = await attachReferenceTexts(context, questions);
+    if (attachedRefs > 0) {
+      unipusLog(context, `u校园填空题：已附带参考原文 ${attachedRefs} 道（提升改写题准确率）。`);
+    } else if (fillblankCount > 0) {
+      unipusWarn(context,
+        `u校园填空题：未能附带参考原文（填空题 ${fillblankCount} 道；拦截题包 ${interceptedQuestions.length} 个，无可用原文段）。`);
+    }
+  } catch (_refError) { /* 附原文失败不影响主流程 */ }
 
   // v92（2026-11-01）：填空题优先用本地字幕求解（零 token、准确率高）——
   // 题干本身是字幕的挖空版，对齐后答案即字幕原词；只有字幕解不出的题才走 DeepSeek。

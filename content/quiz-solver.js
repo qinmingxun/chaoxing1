@@ -810,6 +810,13 @@
         stem: input.cleanedStem !== undefined ? normalizeWhitespace(input.cleanedStem) : cleanStemHtml(input.stem),
         options: options
       };
+      // v93（2026-11-01）：填空题可附带「参考原文」（听力稿/字幕全文）。
+      // 平台很多填空题题干是原文的表格化改写，模型拿到原文后能准确判断语序与答案，
+      // 比纯题干猜要准得多。仅 qtype=2 且原文非空时传，避免污染其他题型。
+      if (qtype === 2 && input.referenceText !== undefined) {
+        var referenceText = normalizeWhitespace(input.referenceText);
+        if (referenceText) payload.referenceText = referenceText.slice(0, 6000);
+      }
       if (input.model !== undefined) {
         payload.model = toText(input.model);
       }
@@ -1179,6 +1186,11 @@
       };
       if (question && question.cleanedStem !== undefined) {
         input.cleanedStem = question.cleanedStem;
+      }
+      // v93：填空题参考原文（听力稿/字幕全文），由 adapter 在题目对象上挂载。
+      if (question && question.referenceText !== undefined && question.referenceText !== null) {
+        var referenceText = String(question.referenceText).trim();
+        if (referenceText) input.referenceText = referenceText;
       }
 
       var model = question && question.model !== undefined ? question.model : settings.deepseekModel;

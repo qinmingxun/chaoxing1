@@ -128,13 +128,21 @@ function assertDeepSeekPayload(payload) {
   const model = payload.model === undefined ? undefined : requireString(payload, 'model');
   const temperature = payload.temperature === undefined ? undefined : requireNumber(payload, 'temperature');
   const timeoutMs = payload.timeoutMs === undefined ? undefined : requireInteger(payload, 'timeoutMs');
+  // v93：填空题的参考原文（听力稿/字幕全文），可选字段。
+  let referenceText;
+  if (payload.referenceText !== undefined) {
+    referenceText = requireString(payload, 'referenceText');
+    if (referenceText.length > 8000) {
+      throw new RequestError('INVALID_FIELD', 'referenceText is too long', false);
+    }
+  }
   if (temperature !== undefined && (temperature < 0 || temperature > 2)) {
     throw new RequestError('INVALID_FIELD', 'temperature must be between 0 and 2', false);
   }
   if (timeoutMs !== undefined && (timeoutMs < 1 || timeoutMs > 120000)) {
     throw new RequestError('INVALID_FIELD', 'timeoutMs is out of range', false);
   }
-  return { domain, qtype, stem, options: payload.options, model, temperature, timeoutMs };
+  return { domain, qtype, stem, options: payload.options, model, temperature, timeoutMs, referenceText };
 }
 
 async function readStorage(keys) {
@@ -218,7 +226,15 @@ async function handleDeepSeek(payload) {
     ? (typeof stored.deepseekTemperature === 'number' ? stored.deepseekTemperature : DEEPSEEK_DEFAULT_TEMPERATURE)
     : request.temperature;
   const timeoutMs = request.timeoutMs || (Number.isInteger(stored.deepseekTimeoutMs) ? stored.deepseekTimeoutMs : DEEPSEEK_DEFAULT_TIMEOUT_MS);
-  const userContent = JSON.stringify({ qtype: request.qtype, stem: request.stem, options: request.options });
+  const userContent = request.referenceText
+    ? JSON.stringify({
+        qtype: request.qtype,
+        stem: request.stem,
+        options: request.options,
+        referenceText: request.referenceText,
+        note: 'referenceText 是本题对应的听力/视频原文（连续文本）。题干可能是原文的表格化改写（语序被重排、插入了小标题）。请以 referenceText 为准确定每个空的原文用词，按题干空格顺序输出，多个空用 # 分隔。'
+      })
+    : JSON.stringify({ qtype: request.qtype, stem: request.stem, options: request.options });
   return withDeepSeekSlot(async () => {
     const response = await fetchWithTimeout(deepseekUrl, {
       method: 'POST',
