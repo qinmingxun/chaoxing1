@@ -2279,16 +2279,38 @@ async function solveSortableFromLocalSubtitles(context, question) {
 let pendingSortableLanding = null;   // { order, fill, question, context, solvedAt }
 let sortableLandingObserver = null;  // MutationObserver 实例（幂等安装）
 
+// v91（2026-11-01 真机复验发现）：题目已作答后平台渲染的是**只读回显视图**
+// （`.sequence-reply-view`，无 draggable、无 onSortEnd）。此时 wrapper 仍存在且子节点 ≥2，
+// 旧逻辑会一直请求跨世界落地 → bridge 返回 onSortEnd-not-found → 还原 pending →
+// observer 每秒重试（实测 30 次/30 秒，且「停止刷课」后仍不停）。
+// 判据：wrapper 直接子元素**全部**是只读回显视图 → 丢弃 pending，不再重试。
+function isSortableReadOnlyView(wrapper) {
+  try {
+    if (!wrapper || !wrapper.children || !wrapper.children.length) return false;
+    const kids = Array.prototype.slice.call(wrapper.children);
+    const readOnly = kids.filter((child) => /sequence-reply-view/.test(asString(child.className))).length;
+    return readOnly >= 2 && readOnly === kids.length;
+  } catch (_readOnlyError) {
+    return false;
+  }
+}
+
 function tryLandPendingSortable(context) {
   if (!pendingSortableLanding) return false;
   const doc = getContextDocument(context || activeContext);
   if (!doc) return false;
   const wrapper = safeQuery(doc, '#sortableListWrapper') || safeQuery(doc, '.sortable-list-wrapper');
   if (!wrapper || !(wrapper.children && wrapper.children.length >= 2)) return false;
+  if (isSortableReadOnlyView(wrapper)) {
+    pendingSortableLanding = null;
+    unipusLog(context || activeContext, 'u校园排序题：当前是已作答的只读回显视图，无需落位（跳过）。');
+    return true;
+  }
   const pending = pendingSortableLanding;
   pendingSortableLanding = null; // 先取走防重入
+  pending.landAttempts = (pending.landAttempts || 0) + 1;
   // v90：落地必须在主世界执行（isolated world 看不到 __reactFiber$ expando）。
-  // 请求-响应式跨世界调用；失败时还原 pending 供重试。
+  // 请求-响应式跨世界调用；失败时还原 pending 供重试（但有次数上限，见下）。
   requestSortLandViaBridge(context || activeContext, pending.order)
     .then((result) => {
       if (result && result.ok) {
@@ -2296,12 +2318,21 @@ function tryLandPendingSortable(context) {
           `u校园排序题（跨世界落地）：成功（移动 ${result.moved} 次，${result.count} 句重排完成）。`);
         scheduleAutoSubmitForLanded(context || activeContext);
       } else {
+        // v91：失败重试上限 3 次。旧逻辑无限重试，在「已作答只读页」等场景会刷屏。
+        if (pending.landAttempts >= 3) {
+          unipusWarn((context || activeContext),
+            `u校园排序题（跨世界落地）：连续 ${pending.landAttempts} 次失败（${result && result.reason}），放弃本页落位。`);
+          return;
+        }
         unipusWarn((context || activeContext),
           `u校园排序题（跨世界落地）：未成功（${result && result.reason}），稍后由重试兜底。`);
         if (!pendingSortableLanding) pendingSortableLanding = pending;
       }
     })
-    .catch(() => { if (!pendingSortableLanding) pendingSortableLanding = pending; });
+    .catch(() => {
+      if (pending.landAttempts >= 3) return;
+      if (!pendingSortableLanding) pendingSortableLanding = pending;
+    });
   return true;
 }
 
