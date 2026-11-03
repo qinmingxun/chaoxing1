@@ -2148,6 +2148,72 @@ function resolveQuizSolver(context) {
 // ---- 完整答题流程接线（u校园：由用户提交触发拦截注入，不自动提交）----
 // getQuestions() → solveQuestions → 按题目顺序提取答案 → setAnswerQueue →
 // installSubmitInterceptor。返回 {started, reason?, answerCount?} 供调用方（主控接线）检查。
+// ---- v97（2026-11-01 真机回归发现）：选择题同页多题的「下一题」循环 ----
+// 背景：1-8 More practice 等听力选择题页有 5 道题（同题干），平台**同屏只渲染 1 道**，
+// 作答完第 1 道后，页脚按钮是「下一题」而不是「提交」——需要点它进入第 2 道，
+// 依次做完 5 道，页脚才变成「提交」。
+// 旧逻辑：作答第 1 道后直接 scheduleAutoSubmit → 平台报「还有 N 道题没有作答」→
+//       提交被拦 → 页面卡住（实测卡 10 分钟）。
+// 修复：选择题作答完成后，若页脚是「下一题」→ 进入循环逐题作答；
+//       页脚变「提交」后交回原有提交调度。
+let unipusChoiceAdvanceDepth = 0;   // v97：递归深度保护（防止 runAutoAnswer 互相调用无限递归）
+
+async function advanceChoiceQuestionsByNext(context, startIndex) {
+  const doc = getContextDocument(context);
+  if (!doc) return false;
+  const maxRounds = 12;
+  let index = startIndex || 0;
+  if (unipusChoiceAdvanceDepth >= 3) {
+    unipusWarn(context, "u校园选择题：「下一题」循环嵌套过深，停止。");
+    return false;
+  }
+  unipusChoiceAdvanceDepth += 1;
+  try {
+  for (; index < maxRounds; index += 1) {
+    if (unipusSweepEnabled !== true) {
+      unipusLog(context, "u校园选择题：刷课已停止，中断「下一题」循环。");
+      return false;
+    }
+    const docNow = getContextDocument(context);
+    if (!docNow) return false;
+    const nextLink = findFootLinkByText(docNow, /下一题/);
+    if (!nextLink) {
+      // v97 诊断：记录页脚实际按钮，便于定位"外层检测到、内层检测不到"的时序问题。
+      let footDump = "";
+      try {
+        const foot = docNow.querySelector("#pc-foot");
+        const links = foot ? foot.querySelectorAll("a,button") : [];
+        const names = [];
+        for (const link of links) {
+          const visible = isElementVisible(link);
+          names.push(asString(link.textContent).replace(/s+/g, "") + (visible ? "" : "(不可见)"));
+        }
+        footDump = " 页脚=[" + names.join("|") + "]";
+      } catch (_dumpError) { footDump = " 页脚读取失败"; }
+      unipusLog(context, "u校园选择题：本页多题作答完成（页脚已无「下一题」），交回提交流程。" + footDump);
+      return true;
+    }
+    if (!clickWithPointerSequence(context, nextLink)) {
+      unipusWarn(context, "u校园选择题：「下一题」点击失败。");
+      return false;
+    }
+    unipusLog(context, `u校园选择题：已点击「下一题」，等待第 ${index + 2} 题渲染。`);
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    // 等待新题渲染后重新求解该题（题目数据是新的 XHR）
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const solved = await runAutoAnswer(context);
+    if (!solved || solved.started !== true) {
+      unipusLog(context, "u校园选择题：新题未能自动求解，停止「下一题」循环。");
+      return false;
+    }
+  }
+  unipusWarn(context, `u校园选择题：达到「下一题」循环上限 ${maxRounds} 次，停止。`);
+  return false;
+  } finally {
+    unipusChoiceAdvanceDepth -= 1;
+  }
+}
+
 async function runAutoAnswer(ctx) {
   const context = ctx || activeContext;
   if (!context) {
@@ -3069,10 +3135,40 @@ function resolveSortableOrder(answer, optionTexts) {
       if (isTextQuestion && cleaned) textAnswers.push(cleaned);
     }
   }
-  if (missing > 0) {
+  // ---- v97（2026-11-01 真机验证）：同页多题「分页渲染」模式的识别 ----
+  // 平台把一页 5 道同题干选择题逐题渲染（DOM 同时只存在 1 个题块），
+  // 但题包/拦截数据里 5 道题的题干相同 → 求解只能命中当前渲染的那道，其余必然 missing。
+  // 旧逻辑：missing>0 直接 return，永远到不了「逐题作答循环」→ 卡死。
+  // 新逻辑：识别为分页模式且当前题已作答成功 → 不早退，交给 v97 循环逐题处理。
+  let isChoicePaged = false;
+  let choiceSolvedEarly = false;
+  // v97：分页模式判断必须**无条件**执行——missing=0（所有题都解出）时
+  // 若仍是「DOM 只渲染 1 个题块 + 页脚下一题」，说明这是分页模式，
+  // 不能直接提交（否则平台报「还有 N 道题没有作答」）。
+    try {
+      const docPaged = getContextDocument(context);
+      if (docPaged) {
+        const choiceTotal = questions.filter((q) =>
+          q && (q.qtype === 0 || q.qtype === 1 || q.qtype === 3)).length;
+        const nextBtn = findFootLinkByText(docPaged, /下一题/);
+        const blockCount = safeQueryAll(docPaged, ".option-wrap").length;
+        choiceSolvedEarly = questions.some((question, index) => {
+          const pos = solvablePositionByIndex[index];
+          const res = pos !== undefined && pos < results.length ? results[pos] : null;
+          const qt = question && question.qtype;
+          return (qt === 0 || qt === 1 || qt === 3) && Boolean(res && (res.solved === true || (res.skipped === true && res.reason === "already-answered")));
+        });
+        isChoicePaged = choiceTotal >= 2 && Boolean(nextBtn) && blockCount === 1 && choiceSolvedEarly;
+      }
+    } catch (_pagedProbeError) { isChoicePaged = false; }
+  if (missing > 0 && !isChoicePaged) {
     unipusWarn(context,
       `u校园有 ${missing} 道题未获得答案，跳过答案队列下发（避免位置错位导致答案注入到错误题目）。`);
     return { started: false, reason: "missing-answers", missing };
+  }
+  if (isChoicePaged) {
+    unipusLog(context,
+      `u校园选择题：检测到分页渲染模式（${questions.length} 道题、DOM 仅 1 个题块、页脚「下一题」），改为逐题作答（${missing} 道未渲染题不计缺失）。`);
   }
 
   setAnswerQueue(answers);
@@ -3105,7 +3201,7 @@ function resolveSortableOrder(answer, optionTexts) {
   // 选择题（单选/多选/判断）无文本输入框：quiz-solver 经 clickOption 回调点击选项，
   // solved===true 即页面已选中，同样调度自动提交。
   // 填答重试等待期间若发生提交（generation 变化），不再调度自动提交。
-  const choiceSolved = questions.some((question, index) => {
+  const choiceSolved = choiceSolvedEarly || questions.some((question, index) => {
     const solvablePosition = solvablePositionByIndex[index];
     const result = solvablePosition !== undefined && solvablePosition < results.length
       ? results[solvablePosition] : null;
@@ -3113,6 +3209,17 @@ function resolveSortableOrder(answer, optionTexts) {
     return (qtype === 0 || qtype === 1 || qtype === 3) &&
       Boolean(result && result.solved === true);
   });
+
+  // v97：同页多道选择题时，先用「下一题」逐题作答，页脚变「提交」后再走提交调度。
+  if (choiceSolved || isChoicePaged) {
+    const docChoice = getContextDocument(context);
+    const nextChoiceLink = docChoice ? findFootLinkByText(docChoice, /下一题/) : null;
+    if (nextChoiceLink) {
+      unipusLog(context, "u校园选择题：本页含多道题（页脚为「下一题」），进入逐题作答循环。");
+      await advanceChoiceQuestionsByNext(context, 0);
+      return { started: true, answerCount: answers.length };
+    }
+  }
   // 语音题：提交前模拟录音（合成音频流由 MAIN bridge 注入，不使用真实麦克风）。
   if (hasVoiceQuestions) {
     await simulateVoiceRecordings(context);
