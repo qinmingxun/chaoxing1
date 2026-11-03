@@ -2830,9 +2830,9 @@ function installSortableLandingObserver(context) {
 // 落地成功后调度提交（若自动提交开启）：复用既有调度入口。
 function scheduleAutoSubmitForLanded(context) {
   try {
-    // 直接复用 runAutoAnswer 的提交兜底路径成本高；此处轻量做法：触发一次「本页立即执行」
-    // 的提交分支 —— 但为避免整轮重跑，仅当 autoAnswer 开启时由看门狗的常规逻辑收尾。
+    // 直接复用 runAutoAnswer 的提交兜底路径成本高；此处轻量做法：提交交给看门狗的常规逻辑收尾。
     // 保守起见：只记日志，提交交给既有 watchdog/语音循环收尾（已验证不冲突）。
+    // 2026-11-03：面板「本页立即执行」按钮已移除（用户要求只保留「开始刷课」作为唯一控制按钮）。
     unipusLog(context, 'u校园排序题：落地完成，提交由既有流程收尾。');
   } catch (_e) { /* 忽略 */ }
 }
@@ -5812,21 +5812,6 @@ function buildUnipusUi() {
   bankCol.appendChild(bankUrlRow);
   bankCol.appendChild(bankKeyRow);
 
-  // 本页立即执行
-  const runBtn = doc.createElement("button");
-  runBtn.className = "ch-btn";
-  runBtn.id = "ch-run-now";
-  runBtn.textContent = "▶ 本页立即执行（答题+录音）";
-  runBtn.addEventListener("click", () => {
-    if (unipusSweepEnabled !== true) {
-      pushUiLog("刷课已停止，请先点「开始刷课」", true);
-      return;
-    }
-    pushUiLog("手动触发一轮执行", false);
-    resetAutoAnswerState();
-    void triggerAutoAnswerOnce();
-  });
-
   // 日志区
   const log = doc.createElement("div");
   log.className = "ch-log";
@@ -5837,7 +5822,6 @@ function buildUnipusUi() {
   body.appendChild(videoRow);
   body.appendChild(keyCol);
   body.appendChild(bankCol);
-  body.appendChild(runBtn);
   body.appendChild(log);
 
   // 从 chrome.storage 同步开关状态（刷新后保持）
