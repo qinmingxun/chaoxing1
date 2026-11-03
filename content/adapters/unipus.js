@@ -3217,6 +3217,12 @@ function resolveSortableOrder(answer, optionTexts) {
     if (nextChoiceLink) {
       unipusLog(context, "u校园选择题：本页含多道题（页脚为「下一题」），进入逐题作答循环。");
       await advanceChoiceQuestionsByNext(context, 0);
+      // v97 修复：循环完成后页脚已变「提 交」，必须调度提交——否则页面永远停在
+      // 「等待用户提交」状态（实测 u1g832 卡死：循环退出后直接 return，跳过了 scheduleAutoSubmit）。
+      const docAfter = getContextDocument(context);
+      if (docAfter && findFootLinkByText(docAfter, /提 交|提交/)) {
+        scheduleAutoSubmit(context);
+      }
       return { started: true, answerCount: answers.length };
     }
   }
