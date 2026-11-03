@@ -2748,7 +2748,14 @@ function isSortableReadOnlyView(wrapper) {
     if (!wrapper || !wrapper.children || !wrapper.children.length) return false;
     const kids = Array.prototype.slice.call(wrapper.children);
     const readOnly = kids.filter((child) => /sequence-reply-view/.test(asString(child.className))).length;
-    return readOnly >= 2 && readOnly === kids.length;
+    // 2026-11-03 真机复核修正：只读回显视图的直接子元素是「数字行(sortable-list-question-no) +
+    // 句子行(sequence-reply-view-item-text)」交替 12 个，只有句子行匹配 sequence-reply-view，
+    // 因此「全部子元素都匹配」永不成立（v91 判据在真机上不触发）。改为：
+    // ≥2 个回显项 且 无任何可拖拽元素 → 判定为只读回显。
+    const draggable = kids.filter((child) => {
+      try { return !!(child.getAttribute && child.getAttribute('draggable') === 'true'); } catch (_dragError) { return false; }
+    }).length;
+    return readOnly >= 2 && draggable === 0;
   } catch (_readOnlyError) {
     return false;
   }
