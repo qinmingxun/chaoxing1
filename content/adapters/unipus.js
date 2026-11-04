@@ -601,6 +601,12 @@ const UNIPUS_QTYPE_BY_REPLY = Object.freeze({
   "drag-drop": 5,
 });
 
+// 2026-11-04：replyType 缺失/未知时，用题干里的挖空标记（____N____）兜底判定为填空题（qtype=2），
+// 否则会落回 4（语音）导致填空题被误判、送错求解路径（实测 u3g147 replyType 缺失但有挖空标记）。
+function looksLikeFillblankStem(text) {
+  return /_\d+_+/.test(asString(text));
+}
+
 // WebCrypto 不支持 AES-ECB（AES-CBC 强制 PKCS7 去填充校验，无法处理 ZeroPadding 块），
 // 因此内置紧凑的纯 JS AES-128 解密（标准 FIPS-197，S 盒表硬编码，无外部依赖）。
 const AES_SBOX = new Uint8Array([
@@ -1124,7 +1130,7 @@ function parseUnipusQuestionJson(plainText) {
       ).toLowerCase();
       const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
         ? UNIPUS_QTYPE_BY_REPLY[replyType]
-        : 4;
+        : (looksLikeFillblankStem(stem) ? 2 : 4);
       const isVoice = UNIPUS_VOICE_REPLY_KEYWORDS.test(replyType);
       if (!isVoice && UNIPUS_QTYPE_BY_REPLY[replyType] === undefined) {
         logUnknownReplyTypeOnce(replyType);
@@ -1181,7 +1187,7 @@ function parseUnipusQuestionJson(plainText) {
       ).toLowerCase();
       const qtype = UNIPUS_QTYPE_BY_REPLY[replyType] !== undefined
         ? UNIPUS_QTYPE_BY_REPLY[replyType]
-        : 4;
+        : (looksLikeFillblankStem(stem) ? 2 : 4);
       const isVoice = UNIPUS_VOICE_REPLY_KEYWORDS.test(replyType);
       if (!isVoice && UNIPUS_QTYPE_BY_REPLY[replyType] === undefined) {
         logUnknownReplyTypeOnce(replyType);

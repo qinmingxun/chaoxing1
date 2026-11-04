@@ -226,15 +226,23 @@ async function handleDeepSeek(payload) {
     ? (typeof stored.deepseekTemperature === 'number' ? stored.deepseekTemperature : DEEPSEEK_DEFAULT_TEMPERATURE)
     : request.temperature;
   const timeoutMs = request.timeoutMs || (Number.isInteger(stored.deepseekTimeoutMs) ? stored.deepseekTimeoutMs : DEEPSEEK_DEFAULT_TIMEOUT_MS);
+  // 2026-11-04：填空题（qtype=2）提示增强——统计题干空数并明确输出格式。
+  const stemText = typeof request.stem === 'string' ? request.stem : '';
+  const blankMatches = stemText.match(/_+\d+_+/g);
+  const blankCount = blankMatches ? blankMatches.length : 0;
+  const fillInstruction = blankCount > 0
+    ? '本题有 ' + blankCount + ' 个空。请为每个空给出原文中对应的一个词或短语（不要整句），按题干空格顺序输出，多个空用 # 分隔，不要添加编号、解释或标点。'
+    : '';
   const userContent = request.referenceText
     ? JSON.stringify({
         qtype: request.qtype,
         stem: request.stem,
         options: request.options,
+        blankCount,
         referenceText: request.referenceText,
-        note: 'referenceText 是本题对应的听力/视频原文（连续文本）。题干可能是原文的表格化改写（语序被重排、插入了小标题）。请以 referenceText 为准确定每个空的原文用词，按题干空格顺序输出，多个空用 # 分隔。'
+        note: 'referenceText 是本题对应的听力/视频原文（连续文本）。题干可能是原文的表格化改写（语序被重排、插入了小标题）。请以 referenceText 为准确定每个空的原文用词。' + fillInstruction
       })
-    : JSON.stringify({ qtype: request.qtype, stem: request.stem, options: request.options });
+    : JSON.stringify({ qtype: request.qtype, stem: request.stem, options: request.options, blankCount, note: fillInstruction });
   return withDeepSeekSlot(async () => {
     const response = await fetchWithTimeout(deepseekUrl, {
       method: 'POST',
