@@ -230,8 +230,20 @@ async function handleDeepSeek(payload) {
   const stemText = typeof request.stem === 'string' ? request.stem : '';
   const blankMatches = stemText.match(/_+\d+_+/g);
   const blankCount = blankMatches ? blankMatches.length : 0;
+  const fillFormat = blankCount > 0
+    ? '本题有 ' + blankCount + ' 个空。按题干空格顺序输出，多个空用 # 分隔，不要添加编号、解释或标点。'
+    : '';
   const fillInstruction = blankCount > 0
-    ? '本题有 ' + blankCount + ' 个空。请为每个空给出原文中对应的一个词或短语（不要整句），按题干空格顺序输出，多个空用 # 分隔，不要添加编号、解释或标点。'
+    ? '请为每个空给出原文中对应的一个词或短语（不要整句）。' + fillFormat
+    : '';
+  // 2026-11-04 全课扫描实测：19 道填空题里 7 道题包**不带任何听力原文或字幕**（Role-playing 的
+  // "听录音补全笔记/表格"类为主）。这类题只能靠题干结构推断——题干通常保留表格/笔记标签
+  // （Reasons for calling / Day / Time / table for N people），据此提示模型给出结构合理的答案，
+  // 明显优于无提示瞎猜。有原文时仍以原文为准。
+  const noRefInstruction = blankCount > 0
+    ? '本题没有听力原文，只有音频。请根据题干的表格/笔记结构推断每个空最可能的答案（例如 '
+      + '"table for ____ people" 填数字、"Day: ____" 填星期、"Time: ____" 填时间、'
+      + '"Reasons for calling: ____" 填简短名词短语），每个空只给一个词或短语。' + fillFormat
     : '';
   const userContent = request.referenceText
     ? JSON.stringify({
@@ -242,7 +254,7 @@ async function handleDeepSeek(payload) {
         referenceText: request.referenceText,
         note: 'referenceText 是本题对应的听力/视频原文（连续文本）。题干可能是原文的表格化改写（语序被重排、插入了小标题）。请以 referenceText 为准确定每个空的原文用词。' + fillInstruction
       })
-    : JSON.stringify({ qtype: request.qtype, stem: request.stem, options: request.options, blankCount, note: fillInstruction });
+    : JSON.stringify({ qtype: request.qtype, stem: request.stem, options: request.options, blankCount, note: noRefInstruction });
   return withDeepSeekSlot(async () => {
     const response = await fetchWithTimeout(deepseekUrl, {
       method: 'POST',
